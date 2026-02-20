@@ -39,6 +39,48 @@ public:
     // APVTS — public so PluginEditor can create attachments
     juce::AudioProcessorValueTreeState parameters;
 
+    //==========================================================================
+    // Plugin loading API (called from PluginEditor on message thread)
+
+    // Returns all known plugins as a sorted array (call after scanComplete)
+    juce::Array<juce::PluginDescription> getKnownPlugins() const;
+
+    // Load a plugin asynchronously (callback fires on message thread when ready or failed)
+    void loadPlugin (const juce::PluginDescription& desc,
+                     std::function<void(bool success, const juce::String& error)> callback);
+
+    // Unload the currently hosted plugin (message thread only)
+    void unloadPlugin();
+
+    // Accessor for hosted plugin (message thread only)
+    juce::AudioPluginInstance* getHostedPlugin() const { return hostedPlugin.get(); }
+
+    // Persistence helpers
+    juce::File getScanCacheFile() const;
+    juce::File getDeadMansPedalFile() const;
+
+    // Start background scan (called once from constructor)
+    void startPluginScan();
+
+    //==========================================================================
+    // Phase 3.1: Plugin Hosting Engine — public atomic state
+
+    // Thread safety: UI reads knownPluginList only after scan completes
+    std::atomic<bool> scanComplete { false };
+
+    // Scan progress notifier (broadcast on message thread when scan progress updates)
+    juce::ChangeBroadcaster scanBroadcaster;
+    std::atomic<int> scanProgressPercent { 0 };
+    std::atomic<int> scanTotalPlugins    { 0 };
+    std::atomic<int> scanScannedCount   { 0 };
+
+    //==========================================================================
+    // Format manager — public so PluginScanThread can access it
+    juce::AudioPluginFormatManager formatManager;
+
+    // Known plugin list — populated by scanner, persisted to disk
+    juce::KnownPluginList knownPluginList;
+
 private:
     //==========================================================================
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
@@ -50,6 +92,26 @@ private:
     std::atomic<float>* analysisTypeParam { nullptr };
     std::atomic<float>* testSignalParam   { nullptr };
     std::atomic<float>* comparisonParam   { nullptr };
+
+    //==========================================================================
+    // Phase 3.1: Plugin Hosting Engine — private state
+
+    // Currently hosted plugin instance
+    std::unique_ptr<juce::AudioPluginInstance> hostedPlugin;
+
+    // Thread safety: audio thread checks pluginReady before calling hostedPlugin->processBlock()
+    std::atomic<bool> pluginReady { false };
+
+    // Background scan thread
+    std::unique_ptr<juce::Thread> scanThread;
+
+    // Scratch buffers for hosted plugin (pre-allocated in prepareToPlay, never in processBlock)
+    juce::AudioBuffer<float> hostedInputBuffer;
+    juce::AudioBuffer<float> hostedOutputBuffer;
+
+    // Cached sample rate and block size (set in prepareToPlay, read by plugin loading code)
+    double currentSampleRate { 44100.0 };
+    int    currentBlockSize  { 512 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginScopeAudioProcessor)
 };

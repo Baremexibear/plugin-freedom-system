@@ -82,6 +82,12 @@ public:
     float getThdPercent() const;
 
     //==========================================================================
+    // Phase 3.5: Phase response accessors (thread-safe, protected by resultMutex)
+    // Returns (freq_hz, phase_degrees) and (freq_hz, group_delay_ms) pairs.
+    std::vector<std::pair<float,float>> getPhaseResponse() const;
+    std::vector<std::pair<float,float>> getGroupDelay() const;
+
+    //==========================================================================
     // Phase 3.1: Plugin Hosting Engine — public atomic state
 
     // Lifetime sentinel: shared_ptr shared with all callAsync lambdas.
@@ -220,6 +226,11 @@ private:
     // THD results (protected by resultMutex, same lock as freqResponseResult)
     std::vector<std::pair<int,float>> thdHarmonics;   // (harmonic_number 1..8, amplitude_db)
     float thdPercent { 0.0f };
+
+    //==========================================================================
+    // Phase 3.5: Phase Response + Group Delay results (protected by resultMutex)
+    std::vector<std::pair<float,float>> phaseResponseResult;  // (freq_hz, phase_degrees)
+    std::vector<std::pair<float,float>> groupDelayResult;     // (freq_hz, group_delay_ms)
 
     // FrequencyAnalysisThread accesses private members directly
     friend class FrequencyAnalysisThread;

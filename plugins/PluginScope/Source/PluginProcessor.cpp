@@ -404,6 +404,10 @@ public:
             {
                 computeThdMeasurement();
             }
+            else if (analysisType == 3)   // Phase Response (Phase 3.5)
+            {
+                computePhaseResponse();
+            }
             else
             {
                 juce::Thread::sleep (20);   // Other analysis types not yet implemented
@@ -577,6 +581,123 @@ private:
 
         juce::Thread::sleep (100);   // THD updates at ~10 Hz (slow measurement)
     }
+
+    //==========================================================================
+    // Phase 3.5: Phase response + group delay computation
+    //
+    // Algorithm:
+    //   1. Read kFftSize wet + dry samples (reuses same FIFOs as frequency response)
+    //   2. Apply Hann window (good phase preservation, same as freq response)
+    //   3. Complex FFT both signals
+    //   4. H(f) = Wet / Dry per bin (complex division)
+    //   5. φ(f) = atan2(Im(H), Re(H)) — wrapped phase in radians
+    //   6. Unwrap phase (remove 2π jumps)
+    //   7. Convert to degrees for display
+    //   8. Group delay: τ_g(f) = -dφ/dω, central difference, result in ms
+    //
+    // Thread safety: fftWetBuf/fftDryBuf accessed only here (no lock needed).
+    //               phaseResponseResult/groupDelayResult protected by resultMutex.
+
+    void computePhaseResponse()
+    {
+        const int needed = proc.kFftSize;
+        if (proc.captureFifo.getNumReady() / 2 < needed ||
+            proc.dryCaptureFifo.getNumReady() / 2 < needed)
+        {
+            juce::Thread::sleep (10);
+            return;
+        }
+
+        // Read wet and dry samples into FFT work buffers
+        proc.readFifoIntoBuffer (proc.captureFifo,    proc.captureBuffer,
+                                 proc.fftWetBuf.data(), needed);
+        proc.readFifoIntoBuffer (proc.dryCaptureFifo, proc.dryCaptureBuffer,
+                                 proc.fftDryBuf.data(), needed);
+
+        // Apply Hann window — same as frequency response (preserves phase)
+        proc.window.multiplyWithWindowingTable (proc.fftWetBuf.data(), (size_t) proc.kFftSize);
+        proc.window.multiplyWithWindowingTable (proc.fftDryBuf.data(), (size_t) proc.kFftSize);
+
+        // Complex FFT — output is interleaved Re/Im pairs (bin 0 … N/2)
+        proc.fft.performRealOnlyForwardTransform (proc.fftWetBuf.data(), true);
+        proc.fft.performRealOnlyForwardTransform (proc.fftDryBuf.data(), true);
+
+        const float sampleRate = static_cast<float> (proc.currentSampleRate);
+        const float binHz      = sampleRate / static_cast<float> (proc.kFftSize);
+
+        // Compute wrapped phase: φ(f) = arg(H(f)) = atan2(Im(Wet/Dry), Re(Wet/Dry))
+        std::vector<float> wrappedPhase (proc.kFreqBins);
+        std::vector<std::pair<float,float>> phaseFrame (proc.kFreqBins);
+
+        for (int bin = 0; bin < proc.kFreqBins; ++bin)
+        {
+            const float wetRe = proc.fftWetBuf[(size_t) (bin * 2)];
+            const float wetIm = proc.fftWetBuf[(size_t) (bin * 2 + 1)];
+            const float dryRe = proc.fftDryBuf[(size_t) (bin * 2)];
+            const float dryIm = proc.fftDryBuf[(size_t) (bin * 2 + 1)];
+
+            // H(f) = Wet / Dry (complex division)
+            const float dryMagSq = dryRe * dryRe + dryIm * dryIm + 1e-20f;
+            const float hRe      = (wetRe * dryRe + wetIm * dryIm) / dryMagSq;
+            const float hIm      = (wetIm * dryRe - wetRe * dryIm) / dryMagSq;
+
+            wrappedPhase[bin]  = std::atan2 (hIm, hRe);   // radians, [-π, π]
+            phaseFrame[bin].first = (float) bin * binHz;
+        }
+
+        // Phase unwrapping — remove 2π discontinuities
+        const std::vector<float> unwrapped = unwrapPhase (wrappedPhase);
+
+        // Convert to degrees
+        const float radToDeg = 180.0f / juce::MathConstants<float>::pi;
+        for (int bin = 0; bin < proc.kFreqBins; ++bin)
+            phaseFrame[bin].second = unwrapped[bin] * radToDeg;
+
+        // Group delay: τ_g(f) = -dφ/dω  (ω = 2π·f)
+        // Numerical central difference: dφ/dω ≈ (φ[n+1] - φ[n-1]) / (2·Δω)
+        // Result in seconds → converted to milliseconds
+        const float deltaOmega = 2.0f * juce::MathConstants<float>::pi * binHz;
+        std::vector<std::pair<float,float>> groupDelayFrame (proc.kFreqBins);
+
+        groupDelayFrame[0] = { 0.0f, 0.0f };   // DC bin — undefined, set to 0
+
+        for (int bin = 1; bin < proc.kFreqBins - 1; ++bin)
+        {
+            const float dPhi        = unwrapped[bin + 1] - unwrapped[bin - 1];
+            const float groupDelaySec = -dPhi / (2.0f * deltaOmega);
+            groupDelayFrame[bin] = { (float) bin * binHz, groupDelaySec * 1000.0f };
+        }
+        // Copy last valid bin to avoid undefined boundary
+        groupDelayFrame[proc.kFreqBins - 1] = groupDelayFrame[proc.kFreqBins - 2];
+
+        // Publish results (lock protected — read by UI via getPhaseResponse()/getGroupDelay())
+        {
+            const juce::ScopedLock lock (proc.resultMutex);
+            proc.phaseResponseResult = phaseFrame;
+            proc.groupDelayResult    = groupDelayFrame;
+        }
+
+        juce::Thread::sleep (20);   // ~50 Hz update rate
+    }
+
+    //--------------------------------------------------------------------------
+    // Phase 3.5 helper: unwrap a wrapped phase sequence to remove 2π jumps.
+    // Sequential correction: each step is clamped to [-π, π] and accumulated.
+
+    static std::vector<float> unwrapPhase (const std::vector<float>& wrapped)
+    {
+        std::vector<float> unwrapped = wrapped;
+        const float pi = juce::MathConstants<float>::pi;
+        for (size_t i = 1; i < unwrapped.size(); ++i)
+        {
+            float diff = unwrapped[i] - unwrapped[i - 1];
+            // Wrap diff to [-π, π]
+            while (diff >  pi) diff -= 2.0f * pi;
+            while (diff < -pi) diff += 2.0f * pi;
+            unwrapped[i] = unwrapped[i - 1] + diff;
+        }
+        return unwrapped;
+    }
 };
 
 //==============================================================================
@@ -680,6 +801,10 @@ PluginScopeAudioProcessor::PluginScopeAudioProcessor()
 
     // Phase 3.4: Pre-allocate THD result storage (up to 8 harmonics)
     thdHarmonics.reserve (8);
+
+    // Phase 3.5: Pre-allocate phase response and group delay result storage
+    phaseResponseResult.resize ((size_t) kFreqBins, { 0.0f, 0.0f });
+    groupDelayResult   .resize ((size_t) kFreqBins, { 0.0f, 0.0f });
 
     // Start background FFT analysis thread (low priority — never blocks audio)
     analysisThreadShouldRun.store (true);
@@ -879,6 +1004,22 @@ float PluginScopeAudioProcessor::getThdPercent() const
 {
     const juce::ScopedLock lock (resultMutex);
     return thdPercent;
+}
+
+//==============================================================================
+// Phase 3.5: Phase response + group delay accessors — thread-safe reads.
+// Both vectors are protected by resultMutex (same lock as all other results).
+
+std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getPhaseResponse() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return phaseResponseResult;
+}
+
+std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getGroupDelay() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return groupDelayResult;
 }
 
 //==============================================================================

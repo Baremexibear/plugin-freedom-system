@@ -65,6 +65,10 @@ public:
     //==========================================================================
     // Phase 3.1: Plugin Hosting Engine — public atomic state
 
+    // Lifetime sentinel: shared_ptr shared with all callAsync lambdas.
+    // Destructor sets this to false first; lambdas check it before touching *this.
+    std::shared_ptr<std::atomic<bool>> processorAlive { std::make_shared<std::atomic<bool>>(true) };
+
     // Thread safety: UI reads knownPluginList only after scan completes
     std::atomic<bool> scanComplete { false };
 

@@ -76,10 +76,13 @@ public:
                 ownerProcessor.scanScannedCount.fetch_add (1);
 
                 // Post progress to message thread.
-                // Safe: ownerProcessor outlives the scan thread (stopped in destructor).
-                juce::MessageManager::callAsync ([&ownerRef = ownerProcessor]()
+                // Capture processorAlive by value so the lambda can bail out safely
+                // if the processor is destroyed before this message is dispatched.
+                juce::MessageManager::callAsync ([alive = ownerProcessor.processorAlive,
+                                                  &ownerRef = ownerProcessor]()
                 {
-                    ownerRef.scanBroadcaster.sendChangeMessage();
+                    if (alive->load())
+                        ownerRef.scanBroadcaster.sendChangeMessage();
                 });
             }
         }
@@ -102,9 +105,11 @@ public:
         // Signal completion and notify UI
         ownerProcessor.scanComplete.store (true);
 
-        juce::MessageManager::callAsync ([&ownerRef = ownerProcessor]()
+        juce::MessageManager::callAsync ([alive = ownerProcessor.processorAlive,
+                                          &ownerRef = ownerProcessor]()
         {
-            ownerRef.scanBroadcaster.sendChangeMessage();
+            if (alive->load())
+                ownerRef.scanBroadcaster.sendChangeMessage();
         });
     }
 
@@ -195,6 +200,10 @@ PluginScopeAudioProcessor::PluginScopeAudioProcessor()
 
 PluginScopeAudioProcessor::~PluginScopeAudioProcessor()
 {
+    // Invalidate all pending callAsync lambdas FIRST — they hold a shared_ptr
+    // copy of processorAlive and will bail out before touching *this.
+    processorAlive->store (false);
+
     // Signal audio thread to stop using hosted plugin BEFORE we destroy it
     pluginReady.store (false);
 

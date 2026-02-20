@@ -2,130 +2,282 @@
 #include "PluginEditor.h"
 
 //==============================================================================
-// Phase 3.1: Background Plugin Scanner Thread
+// Phase 3.1: Safe Metadata-Only Plugin Scanner
 //
-// Scans VST3 and AU directories on a low-priority background thread.
-// Uses dead man's pedal to skip plugins that crashed on previous scans.
-// Results are persisted to XML after scan completes.
+// PROBLEM WITH JUCE'S BUILT-IN SCANNER:
+//   juce::PluginDirectoryScanner + VST3PluginFormatHeadless loads each
+//   plugin's binary DLL in-process on a background thread to extract
+//   descriptions. When PluginScope is hosted in a DAW alongside other
+//   plugins (e.g. ScalerAudio2), this DLL loading races with those plugins'
+//   message-thread initialization, corrupting shared JUCE internals and
+//   crashing the host — even though PluginScope's own code is fine.
+//
+// SOLUTION:
+//   Read only static metadata files shipped inside each plugin bundle.
+//   No binary is loaded. No DLL is touched. Safe on any background thread.
+//
+//   VST3 (3.7+): Contents/moduleinfo.json — Steinberg standard
+//   AU  (all):   Contents/Info.plist      — macOS bundle standard
+//
+//   Plugins that pre-date VST3 3.7 (no moduleinfo.json) are skipped.
+//   Binary plist Info.plist files (unusual for distributed plugins) are also
+//   skipped — most plugins ship XML plists.
 //==============================================================================
 
-class PluginScanThread : public juce::Thread
+namespace SafeScanner
+{
+    //--------------------------------------------------------------------------
+    // 4-char OSType helpers — mirrors JUCE's internal osTypeToString()
+
+    static juce::String osTypeToString (uint32_t t)
+    {
+        char s[5] = { (char) ((t >> 24) & 0xff), (char) ((t >> 16) & 0xff),
+                      (char) ((t >>  8) & 0xff), (char)  (t & 0xff), 0 };
+        return juce::String::fromUTF8 (s, 4);
+    }
+
+    // Build the JUCE AU fileOrIdentifier ("AudioUnit:Effects/aufx,XXXX,YYYY")
+    // matching AudioUnitFormatHelpers::createPluginIdentifier() in JUCE source.
+    static juce::String makeAUIdentifier (const juce::String& typeStr,
+                                          const juce::String& subStr,
+                                          const juce::String& mfrStr)
+    {
+        juce::String category;
+        if      (typeStr == "aufx" || typeStr == "aumf") category = "Effects/";
+        else if (typeStr == "aumu")                       category = "Synths/";
+        else if (typeStr == "augn")                       category = "Generators/";
+        else if (typeStr == "aupn")                       category = "Panners/";
+        else if (typeStr == "aumx")                       category = "Mixers/";
+        else if (typeStr == "aump")                       category = "MidiEffects/";
+
+        return "AudioUnit:" + category + typeStr + "," + subStr + "," + mfrStr;
+    }
+
+    //--------------------------------------------------------------------------
+    // Notify scan progress — helper shared by both format scanners
+
+    static void postProgress (const std::shared_ptr<std::atomic<bool>>& alive,
+                               PluginScopeAudioProcessor& owner)
+    {
+        owner.scanScannedCount.fetch_add (1);
+        juce::MessageManager::callAsync ([alive, &ownerRef = owner]()
+        {
+            if (alive->load())
+                ownerRef.scanBroadcaster.sendChangeMessage();
+        });
+    }
+
+    //--------------------------------------------------------------------------
+    // Scan a single VST3 bundle by reading Contents/moduleinfo.json.
+    // Returns true if at least one class was found.
+
+    static bool scanVST3Bundle (const juce::File& bundle,
+                                 const juce::String& selfStem,
+                                 juce::KnownPluginList& list)
+    {
+        if (bundle.getFileNameWithoutExtension().equalsIgnoreCase (selfStem))
+            return false;
+
+        auto moduleInfo = bundle.getChildFile ("Contents/moduleinfo.json");
+        if (! moduleInfo.existsAsFile())
+            return false;
+
+        auto jsonVar = juce::JSON::parse (moduleInfo);
+        if (! jsonVar.isObject())
+            return false;
+
+        auto factoryInfo = jsonVar["Factory Info"];
+        juce::String vendor;
+        if (factoryInfo.isObject())
+            vendor = factoryInfo["Vendor"].toString();
+
+        juce::String version = jsonVar["Version"].toString();
+
+        auto classes = jsonVar["Classes"];
+        if (! classes.isArray())
+            return false;
+
+        bool found = false;
+        for (const auto& cls : *classes.getArray())
+        {
+            if (! cls.isObject()) continue;
+            if (cls["Category"].toString() != "Audio Module Class") continue;
+
+            juce::PluginDescription pd;
+            pd.pluginFormatName = "VST3";
+            pd.fileOrIdentifier = bundle.getFullPathName();
+            pd.name             = cls["Name"].toString();
+            pd.manufacturerName = vendor;
+            pd.version          = version;
+            pd.category         = cls["Sub-Categories"].toString();
+
+            // UID is a 32-char hex string; use last 8 hex chars as uniqueId
+            auto uid = cls["UID"].toString().removeCharacters ("-");
+            if (uid.length() >= 8)
+                pd.uniqueId = (int) uid.substring (uid.length() - 8).getHexValue64();
+
+            pd.isInstrument = pd.category.containsIgnoreCase ("Instrument")
+                           || pd.category.containsIgnoreCase ("Synth");
+
+            if (pd.name.isNotEmpty() && ! pd.name.equalsIgnoreCase (selfStem))
+            {
+                list.addType (pd);
+                found = true;
+            }
+        }
+        return found;
+    }
+
+    //--------------------------------------------------------------------------
+    // Scan a single AU bundle by reading Contents/Info.plist (XML format).
+    // Returns true if at least one AudioComponent entry was found.
+
+    static bool scanAUBundle (const juce::File& bundle,
+                               const juce::String& selfStem,
+                               juce::KnownPluginList& list)
+    {
+        if (bundle.getFileNameWithoutExtension().equalsIgnoreCase (selfStem))
+            return false;
+
+        auto plist = bundle.getChildFile ("Contents/Info.plist");
+        if (! plist.existsAsFile()) return false;
+
+        // XmlDocument::parse fails on binary plists — that's fine, we skip them
+        auto xml = juce::XmlDocument::parse (plist);
+        if (xml == nullptr) return false;
+
+        // Plist structure: <plist><dict>...<key>AudioComponents</key><array>...
+        auto* dict = xml->getFirstChildElement();
+        if (dict == nullptr) return false;
+
+        juce::XmlElement* acArray = nullptr;
+        for (auto* kv = dict->getFirstChildElement(); kv != nullptr; kv = kv->getNextElement())
+        {
+            if (kv->getTagName() == "key" && kv->getAllSubText() == "AudioComponents")
+            {
+                acArray = kv->getNextElement();
+                break;
+            }
+        }
+        if (acArray == nullptr) return false;
+
+        bool found = false;
+        for (auto* entry = acArray->getFirstChildElement();
+             entry != nullptr;
+             entry = entry->getNextElement())
+        {
+            if (entry->getTagName() != "dict") continue;
+
+            juce::String name, typeStr, subStr, mfrStr;
+
+            for (auto* kv = entry->getFirstChildElement(); kv != nullptr; kv = kv->getNextElement())
+            {
+                if (kv->getTagName() != "key") continue;
+                const auto key = kv->getAllSubText();
+                auto* val      = kv->getNextElement();
+                if (val == nullptr) continue;
+
+                if      (key == "name")         name    = val->getAllSubText();
+                else if (key == "type")         typeStr = val->getAllSubText();
+                else if (key == "subtype")      subStr  = val->getAllSubText();
+                else if (key == "manufacturer") mfrStr  = val->getAllSubText();
+            }
+
+            if (typeStr.length() < 4 || subStr.length() < 4 || mfrStr.length() < 4)
+                continue;
+
+            juce::PluginDescription pd;
+            pd.pluginFormatName = "AudioUnit";
+            pd.fileOrIdentifier = makeAUIdentifier (typeStr, subStr, mfrStr);
+
+            // Info.plist name is "Vendor: Plugin Name" — split on ':'
+            if (name.containsChar (':'))
+            {
+                pd.manufacturerName = name.upToFirstOccurrenceOf (":", false, false).trim();
+                pd.name             = name.fromFirstOccurrenceOf (":", false, false).trim();
+            }
+            else
+            {
+                pd.name = name.isEmpty() ? bundle.getFileNameWithoutExtension() : name;
+            }
+
+            pd.isInstrument = (typeStr == "aumu");
+
+            // uniqueId: sub-type bytes as int (enough to distinguish within a manufacturer)
+            pd.uniqueId = (int) (((uint32_t)(uint8_t)subStr[0] << 24)
+                               | ((uint32_t)(uint8_t)subStr[1] << 16)
+                               | ((uint32_t)(uint8_t)subStr[2] <<  8)
+                               |  (uint32_t)(uint8_t)subStr[3]);
+
+            if (pd.name.isNotEmpty() && ! pd.name.equalsIgnoreCase (selfStem))
+            {
+                list.addType (pd);
+                found = true;
+            }
+        }
+        return found;
+    }
+
+} // namespace SafeScanner
+
+//==============================================================================
+// SafePluginScanThread — uses SafeScanner (no DLL loading)
+
+class SafePluginScanThread : public juce::Thread
 {
 public:
-    explicit PluginScanThread (PluginScopeAudioProcessor& owner)
+    explicit SafePluginScanThread (PluginScopeAudioProcessor& owner)
         : juce::Thread ("PluginScanner"), ownerProcessor (owner)
     {
     }
 
     void run() override
     {
-        // Ensure data directory exists before writing dead man's pedal / cache
-        auto pedalFile = ownerProcessor.getDeadMansPedalFile();
-        pedalFile.getParentDirectory().createDirectory();
+        // Derive self-bundle stem for exclusion (same logic regardless of format)
+        auto selfExe  = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
+        auto selfStem = selfExe.getParentDirectory()  // MacOS/
+                               .getParentDirectory()  // Contents/
+                               .getParentDirectory()  // PluginScope.{vst3,component}
+                               .getFileNameWithoutExtension(); // "PluginScope"
 
-        // SELF-EXCLUSION (per-format):
-        //
-        // PluginDirectoryScanner reads the dead man's pedal ONCE in its constructor
-        // and adds that single path to its internal skip list. We must write the path
-        // of OUR bundle for the format being scanned before the scanner is created.
-        //
-        // Critical bug if this is wrong: if PluginScope runs as VST3 but the pedal
-        // only has the .vst3 path, the AU scanner finds PluginScope.component in the
-        // Components folder (a DIFFERENT directory), loads it, and triggers a recursive
-        // scan → crash.
-        //
-        // Correct approach: build the search paths FIRST, then search them for our own
-        // bundle (bundleStem + format-specific extension). That gives us the real
-        // installed path in the right directory, regardless of which format we run as.
-        auto selfExe    = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
-        auto selfBundle = selfExe.getParentDirectory()   // MacOS/
-                                 .getParentDirectory()   // Contents/
-                                 .getParentDirectory();  // PluginScope.{vst3,component}
-        auto bundleStem = selfBundle.getFileNameWithoutExtension(); // "PluginScope"
+        // Rebuild the list from scratch each time
+        ownerProcessor.knownPluginList.clear();
 
-        // Iterate over every registered format (VST3 + AU on macOS)
-        for (int formatIdx = 0; formatIdx < ownerProcessor.formatManager.getNumFormats(); ++formatIdx)
+        // ---- VST3 -------------------------------------------------------
+        for (auto& dir : { juce::File ("/Library/Audio/Plug-Ins/VST3"),
+                            juce::File::getSpecialLocation (juce::File::userHomeDirectory)
+                                .getChildFile ("Library/Audio/Plug-Ins/VST3") })
         {
-            if (threadShouldExit())
-                break;
+            if (threadShouldExit() || ! dir.isDirectory()) continue;
 
-            auto* format = ownerProcessor.formatManager.getFormat (formatIdx);
-
-            // Build search paths for this format FIRST — we need them to locate our
-            // own bundle in the right directory before we can write the pedal.
-            juce::FileSearchPath paths;
-
-            if (format->getName().containsIgnoreCase ("VST3"))
+            for (const auto& entry : juce::RangedDirectoryIterator (
+                     dir, true, "*.vst3", juce::File::findDirectories))
             {
-                paths.add (juce::File ("/Library/Audio/Plug-Ins/VST3"));
-                paths.add (juce::File::getSpecialLocation (juce::File::userHomeDirectory)
-                               .getChildFile ("Library/Audio/Plug-Ins/VST3"));
-            }
-            else
-            {
-                // AU and other formats: use JUCE defaults
-                paths = format->getDefaultLocationsToSearch();
-            }
-
-            // Now write the self-bundle path to the dead man's pedal.
-            // Search each of this format's directories for bundleStem + extension.
-            // The scanner reads the pedal in its constructor, so this must happen first.
-            {
-                juce::String selfExt;
-                if (format->getName().containsIgnoreCase ("VST3"))
-                    selfExt = ".vst3";
-                else if (format->getName().containsIgnoreCase ("AU") ||
-                         format->getName().containsIgnoreCase ("AudioUnit"))
-                    selfExt = ".component";
-
-                juce::File foundSelf;
-                for (int i = 0; i < paths.getNumPaths(); ++i)
-                {
-                    auto candidate = paths[i].getChildFile (bundleStem + selfExt);
-                    if (candidate.exists())
-                    {
-                        foundSelf = candidate;
-                        break;
-                    }
-                }
-
-                // Write found path (or fall back to current bundle if not found)
-                pedalFile.replaceWithText (foundSelf.exists()
-                                               ? foundSelf.getFullPathName()
-                                               : selfBundle.getFullPathName());
-            }
-
-            // Scanner reads pedal file in constructor — our bundle for this format is
-            // now in the pedal, so the scanner will skip it automatically.
-            juce::PluginDirectoryScanner scanner (
-                ownerProcessor.knownPluginList,
-                *format,
-                paths,
-                true,   // dontRescanIfAlreadyInList
-                pedalFile);
-
-            juce::String pluginBeingScanned;
-            while (!threadShouldExit() && scanner.scanNextFile (true, pluginBeingScanned))
-            {
-                ownerProcessor.scanScannedCount.fetch_add (1);
-
-                // Post progress to message thread.
-                // Capture processorAlive by value so the lambda can bail out safely
-                // if the processor is destroyed before this message is dispatched.
-                juce::MessageManager::callAsync ([alive = ownerProcessor.processorAlive,
-                                                  &ownerRef = ownerProcessor]()
-                {
-                    if (alive->load())
-                        ownerRef.scanBroadcaster.sendChangeMessage();
-                });
+                if (threadShouldExit()) break;
+                if (SafeScanner::scanVST3Bundle (entry.getFile(), selfStem,
+                                                 ownerProcessor.knownPluginList))
+                    SafeScanner::postProgress (ownerProcessor.processorAlive, ownerProcessor);
             }
         }
 
-        // Clear dead man's pedal now that scan completed without crash.
-        // Next launch will re-populate it before the next scan.
-        pedalFile.replaceWithText ({});
+        // ---- AU ---------------------------------------------------------
+        for (auto& dir : { juce::File ("/Library/Audio/Plug-Ins/Components"),
+                            juce::File::getSpecialLocation (juce::File::userHomeDirectory)
+                                .getChildFile ("Library/Audio/Plug-Ins/Components") })
+        {
+            if (threadShouldExit() || ! dir.isDirectory()) continue;
 
-        // Persist scan results to disk so subsequent launches skip the full scan
+            for (const auto& entry : juce::RangedDirectoryIterator (
+                     dir, false, "*.component", juce::File::findDirectories))
+            {
+                if (threadShouldExit()) break;
+                if (SafeScanner::scanAUBundle (entry.getFile(), selfStem,
+                                               ownerProcessor.knownPluginList))
+                    SafeScanner::postProgress (ownerProcessor.processorAlive, ownerProcessor);
+            }
+        }
+
+        // Persist results
         {
             std::unique_ptr<juce::XmlElement> xml (ownerProcessor.knownPluginList.createXml());
             if (xml != nullptr)
@@ -136,9 +288,8 @@ public:
             }
         }
 
-        // Signal completion and notify UI
+        // Signal completion
         ownerProcessor.scanComplete.store (true);
-
         juce::MessageManager::callAsync ([alive = ownerProcessor.processorAlive,
                                           &ownerRef = ownerProcessor]()
         {
@@ -427,9 +578,9 @@ juce::File PluginScopeAudioProcessor::getDeadMansPedalFile() const
 //==============================================================================
 void PluginScopeAudioProcessor::startPluginScan()
 {
-    if (scanThread == nullptr || !scanThread->isThreadRunning())
+    if (scanThread == nullptr || ! scanThread->isThreadRunning())
     {
-        scanThread = std::make_unique<PluginScanThread> (*this);
+        scanThread = std::make_unique<SafePluginScanThread> (*this);
         scanThread->startThread (juce::Thread::Priority::low);
     }
 }

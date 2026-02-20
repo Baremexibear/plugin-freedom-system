@@ -412,9 +412,13 @@ public:
             {
                 computePhaseResponse();
             }
+            else if (analysisType == 4)   // Latency (Phase 3.7)
+            {
+                computeLatencyMeasurement();
+            }
             else
             {
-                juce::Thread::sleep (20);   // Other analysis types not yet implemented
+                juce::Thread::sleep (20);
             }
         }
     }
@@ -854,6 +858,90 @@ private:
         // Brief pause before allowing a re-trigger to prevent accidental double-sweep.
         juce::Thread::sleep (500);
     }
+
+    //==========================================================================
+    // Phase 3.7: Latency measurement
+    //
+    // Method A: Direct query via getLatencySamples() — always available when a
+    //           plugin is loaded.
+    // Method B: Empirical — inject a Dirac impulse via latencyImpulsePending,
+    //           scan the wet capture FIFO for the first sample above threshold,
+    //           and report that sample index as the measured latency.
+
+    void computeLatencyMeasurement()
+    {
+        // Method A: direct query (always available)
+        if (proc.hostedPlugin != nullptr && proc.pluginReady.load())
+        {
+            const int samplesA = proc.hostedPlugin->getLatencySamples();
+            proc.latencyMethodA.store (samplesA);
+            proc.latencyMsA.store ((float) samplesA * 1000.0f
+                                   / (float) proc.currentSampleRate);
+        }
+
+        // Method B: empirical impulse measurement
+        // 1. Flush any stale samples from the wet capture FIFO
+        {
+            const int avail = proc.captureFifo.getNumReady();
+            if (avail > 0)
+            {
+                int s1, sz1, s2, sz2;
+                proc.captureFifo.prepareToRead (avail, s1, sz1, s2, sz2);
+                proc.captureFifo.finishedRead (sz1 + sz2);
+            }
+        }
+
+        // 2. Trigger impulse injection in processBlock
+        proc.latencyImpulsePending.store (true);
+
+        // 3. Wait for up to 500 ms worth of samples to arrive in the FIFO
+        const int maxWaitSamples = (int) (proc.currentSampleRate * 0.5);
+        const int needed         = maxWaitSamples * 2;   // interleaved L+R pairs
+        int waited               = 0;
+        while (! threadShouldExit()
+               && proc.captureFifo.getNumReady() < needed
+               && waited < 100)
+        {
+            juce::Thread::sleep (5);
+            ++waited;
+        }
+
+        // 4. Scan for first peak above threshold
+        const int ready = proc.captureFifo.getNumReady();
+        if (ready > 0)
+        {
+            int s1, sz1, s2, sz2;
+            proc.captureFifo.prepareToRead (ready, s1, sz1, s2, sz2);
+
+            constexpr float kThreshold = 0.001f;   // -60 dBFS threshold
+            int peakIndex = -1;
+
+            // Search region 1 (even indices = left channel in interleaved buffer)
+            for (int i = 0; i < sz1 && peakIndex < 0; i += 2)
+            {
+                if (std::abs (proc.captureBuffer.getSample (0, s1 + i)) > kThreshold)
+                    peakIndex = (s1 + i) / 2;
+            }
+            // Search region 2 (wrap-around)
+            for (int i = 0; i < sz2 && peakIndex < 0; i += 2)
+            {
+                if (std::abs (proc.captureBuffer.getSample (0, s2 + i)) > kThreshold)
+                    peakIndex = (sz1 / 2) + (s2 + i) / 2;
+            }
+
+            proc.captureFifo.finishedRead (sz1 + sz2);
+
+            if (peakIndex >= 0)
+            {
+                proc.latencyMethodB.store (peakIndex);
+                proc.latencyMsB.store ((float) peakIndex * 1000.0f
+                                       / (float) proc.currentSampleRate);
+            }
+        }
+
+        // Rate-limit: don't hammer the FIFO — wait before next measurement
+        juce::Thread::sleep (200);
+    }
 };
 
 //==============================================================================
@@ -977,8 +1065,9 @@ PluginScopeAudioProcessor::~PluginScopeAudioProcessor()
     // copy of processorAlive and will bail out before touching *this.
     processorAlive->store (false);
 
-    // Signal audio thread to stop using hosted plugin BEFORE we destroy it
+    // Signal audio thread to stop using hosted plugins BEFORE we destroy them
     pluginReady.store (false);
+    pluginBReady.store (false);   // Phase 3.7: also stop plugin B
 
     // Phase 3.3: Stop analysis thread BEFORE destroying buffers it may be reading
     analysisThreadShouldRun.store (false);
@@ -988,6 +1077,9 @@ PluginScopeAudioProcessor::~PluginScopeAudioProcessor()
     // Stop scanner thread cleanly (wait up to 3 seconds)
     if (scanThread != nullptr)
         scanThread->stopThread (3000);
+
+    // Phase 3.7: Release plugin B before plugin A
+    hostedPluginB.reset();
 
     // Release hosted plugin on message thread
     hostedPlugin.reset();
@@ -1013,6 +1105,16 @@ void PluginScopeAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     // Re-prepare hosted plugin if one is already loaded
     if (hostedPlugin != nullptr && pluginReady.load())
         hostedPlugin->prepareToPlay (sampleRate, samplesPerBlock);
+
+    // Phase 3.7: Allocate plugin B scratch buffer and re-prepare if loaded
+    hostedOutputBufferB.setSize (2, samplesPerBlock);
+    if (hostedPluginB != nullptr && pluginBReady.load())
+        hostedPluginB->prepareToPlay (sampleRate, samplesPerBlock);
+
+    // Phase 3.7: Resize and reset plugin B capture buffer + FIFO
+    captureBufferB.setSize (2, kCaptureFifoSize);
+    captureBufferB.clear();
+    captureFifoB.reset();
 
     // Phase 3.2: Resize and reset the lock-free wet capture buffer
     captureBuffer.setSize (2, kCaptureFifoSize);
@@ -1042,6 +1144,10 @@ void PluginScopeAudioProcessor::releaseResources()
     hostedOutputBuffer.setSize (0, 0);
     captureBuffer   .setSize (0, 0);
     dryCaptureBuffer.setSize (0, 0);
+
+    // Phase 3.7: Release plugin B buffers
+    hostedOutputBufferB.setSize (0, 0);
+    captureBufferB.setSize (0, 0);
 }
 
 //==============================================================================
@@ -1082,6 +1188,39 @@ void PluginScopeAudioProcessor::captureOutputSamples (int numSamples)
     }
 
     captureFifo.finishedWrite (numToWrite * 2);
+}
+
+//==============================================================================
+// Phase 3.7: Helper — write hostedOutputBufferB samples into the B capture FIFO.
+// Mirrors captureOutputSamples() but uses captureFifoB / captureBufferB.
+// Called from processBlock() on the audio thread; must be lock-free.
+
+void PluginScopeAudioProcessor::captureOutputSamplesB (int numSamples)
+{
+    const int numToWrite = juce::jmin (numSamples,
+                                       captureFifoB.getFreeSpace() / 2);
+    if (numToWrite <= 0)
+        return;
+
+    int start1, size1, start2, size2;
+    captureFifoB.prepareToWrite (numToWrite * 2, start1, size1, start2, size2);
+
+    // Write region 1 — interleave L/R into sequential FIFO indices
+    for (int i = 0; i < size1 / 2; ++i)
+    {
+        captureBufferB.setSample (0, start1 + i * 2,     hostedOutputBufferB.getSample (0, i));
+        captureBufferB.setSample (0, start1 + i * 2 + 1, hostedOutputBufferB.getSample (1, i));
+    }
+
+    // Write region 2 (wrap-around)
+    const int offset = size1 / 2;
+    for (int i = 0; i < size2 / 2; ++i)
+    {
+        captureBufferB.setSample (0, start2 + i * 2,     hostedOutputBufferB.getSample (0, offset + i));
+        captureBufferB.setSample (0, start2 + i * 2 + 1, hostedOutputBufferB.getSample (1, offset + i));
+    }
+
+    captureFifoB.finishedWrite (numToWrite * 2);
 }
 
 //==============================================================================
@@ -1218,6 +1357,44 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         if (testSignalMode == 3)
             impulsePending = true;
         previousTestSignalMode = testSignalMode;
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3.7: Latency Detection — when analysis_type == 4, inject a Dirac
+    // impulse (triggered by latencyImpulsePending set by analysis thread) and
+    // capture the result for empirical latency measurement.
+    // -----------------------------------------------------------------------
+    {
+        const int analysisType = static_cast<int> (analysisTypeParam->load());
+        if (analysisType == 4)
+        {
+            hostedInputBuffer.clear();
+            if (latencyImpulsePending.load())
+            {
+                hostedInputBuffer.setSample (0, 0, juce::Decibels::decibelsToGain (-12.0f));
+                hostedInputBuffer.setSample (1, 0, juce::Decibels::decibelsToGain (-12.0f));
+                latencyImpulsePending.store (false);
+            }
+
+            if (pluginReady.load() && hostedPlugin != nullptr)
+            {
+                hostedOutputBuffer.clear();
+                juce::MidiBuffer emptyMidi;
+                try
+                {
+                    hostedPlugin->processBlock (hostedOutputBuffer, emptyMidi);
+                }
+                catch (...)
+                {
+                    pluginReady.store (false);
+                }
+                if (pluginReady.load())
+                    captureOutputSamples (numSamples);
+            }
+
+            buffer.clear();   // Output silence to DAW
+            return;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1465,6 +1642,24 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
         // Capture output for analysis engines (Phases 3.3+)
         captureOutputSamples (numSamples);
+
+        // Phase 3.7: A/B mode — also route same test signal through plugin B
+        const int comparisonMode = static_cast<int> (comparisonParam->load());
+        if (comparisonMode == 1 && pluginBReady.load() && hostedPluginB != nullptr)
+        {
+            hostedOutputBufferB.clear();
+            juce::MidiBuffer emptyMidiB;
+            try
+            {
+                hostedPluginB->processBlock (hostedOutputBufferB, emptyMidiB);
+            }
+            catch (...)
+            {
+                pluginBReady.store (false);
+            }
+            if (pluginBReady.load())
+                captureOutputSamplesB (numSamples);
+        }
     }
 
     // Output SILENCE to the DAW — PluginScope does not emit test signals downstream
@@ -1522,6 +1717,83 @@ void PluginScopeAudioProcessor::unloadPlugin()
     pluginReady.store (false);
     juce::Thread::sleep (10);
     hostedPlugin.reset();
+}
+
+//==============================================================================
+// Phase 3.7: Plugin B loading API — mirrors loadPlugin/unloadPlugin for A/B mode.
+// Must be called from the message thread only.
+
+void PluginScopeAudioProcessor::loadPluginB (
+    const juce::PluginDescription& desc,
+    std::function<void(bool, const juce::String&)> callback)
+{
+    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
+
+    // Signal audio thread to stop using plugin B
+    pluginBReady.store (false);
+    juce::Thread::sleep (10);
+    hostedPluginB.reset();
+
+    formatManager.createPluginInstanceAsync (
+        desc,
+        currentSampleRate,
+        currentBlockSize,
+        [this, callback] (std::unique_ptr<juce::AudioPluginInstance> instance,
+                          const juce::String& error)
+        {
+            // Callback fires on the message thread
+            if (instance != nullptr)
+            {
+                instance->prepareToPlay (currentSampleRate, currentBlockSize);
+                hostedPluginB = std::move (instance);
+                pluginBReady.store (true);
+                if (callback) callback (true, {});
+            }
+            else
+            {
+                if (callback) callback (false, error);
+            }
+        });
+}
+
+void PluginScopeAudioProcessor::unloadPluginB()
+{
+    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
+
+    pluginBReady.store (false);
+    juce::Thread::sleep (10);
+    hostedPluginB.reset();
+}
+
+//==============================================================================
+// Phase 3.7: Before-After snapshot API.
+// takeSnapshot() copies the current freqResponseResult → snapshotFreqResponse.
+// Both protected by resultMutex so the UI thread can call these safely.
+
+void PluginScopeAudioProcessor::takeSnapshot()
+{
+    const juce::ScopedLock lock (resultMutex);
+    snapshotFreqResponse = freqResponseResult;
+    hasSnapshot = true;
+}
+
+void PluginScopeAudioProcessor::clearSnapshot()
+{
+    const juce::ScopedLock lock (resultMutex);
+    snapshotFreqResponse.clear();
+    hasSnapshot = false;
+}
+
+std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getSnapshotFreqResponse() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return snapshotFreqResponse;
+}
+
+bool PluginScopeAudioProcessor::getHasSnapshot() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return hasSnapshot;
 }
 
 //==============================================================================

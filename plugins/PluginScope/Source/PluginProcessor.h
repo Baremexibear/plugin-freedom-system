@@ -95,6 +95,26 @@ public:
     bool isDynamicsSweepRunning()   const { return dynamicsSweepRunning.load(); }
 
     //==========================================================================
+    // Phase 3.7: Latency accessors (thread-safe, atomic reads)
+    int   getLatencyMethodA()   const { return latencyMethodA.load(); }
+    int   getLatencyMethodB()   const { return latencyMethodB.load(); }
+    float getLatencyMsA()       const { return latencyMsA.load(); }
+    float getLatencyMsB()       const { return latencyMsB.load(); }
+    void  triggerLatencyMeasurement() { latencyImpulsePending.store (true); }
+
+    // Phase 3.7: Plugin B API (message thread only — mirrors loadPlugin/unloadPlugin)
+    void loadPluginB (const juce::PluginDescription& desc,
+                      std::function<void(bool, const juce::String&)> callback);
+    void unloadPluginB();
+    juce::AudioPluginInstance* getHostedPluginB() const { return hostedPluginB.get(); }
+
+    // Phase 3.7: Before-After snapshot
+    void takeSnapshot();
+    void clearSnapshot();
+    std::vector<std::pair<float,float>> getSnapshotFreqResponse() const;
+    bool getHasSnapshot() const;
+
+    //==========================================================================
     // Phase 3.1: Plugin Hosting Engine — public atomic state
 
     // Lifetime sentinel: shared_ptr shared with all callAsync lambdas.
@@ -238,6 +258,34 @@ private:
     // Phase 3.5: Phase Response + Group Delay results (protected by resultMutex)
     std::vector<std::pair<float,float>> phaseResponseResult;  // (freq_hz, phase_degrees)
     std::vector<std::pair<float,float>> groupDelayResult;     // (freq_hz, group_delay_ms)
+
+    //==========================================================================
+    // Phase 3.7: Latency Detection
+
+    // Triggers impulse injection in processBlock when analysis_type == 4
+    std::atomic<bool> latencyImpulsePending { false };
+
+    // Latency results — written exclusively by analysis thread, read by UI via atomics
+    std::atomic<int>   latencyMethodA { 0 };   // samples from getLatencySamples()
+    std::atomic<int>   latencyMethodB { 0 };   // samples from empirical measurement
+    std::atomic<float> latencyMsA     { 0.0f };
+    std::atomic<float> latencyMsB     { 0.0f };
+
+    // Phase 3.7: A/B Plugin Hosting
+    std::unique_ptr<juce::AudioPluginInstance> hostedPluginB;
+    std::atomic<bool> pluginBReady { false };
+    juce::AudioBuffer<float> hostedOutputBufferB;  // sized in prepareToPlay
+
+    // Second capture FIFO for plugin B output (same size as primary)
+    juce::AbstractFifo       captureFifoB { kCaptureFifoSize };
+    juce::AudioBuffer<float> captureBufferB;
+
+    // Phase 3.7: captureOutputSamplesB helper — mirrors captureOutputSamples but uses B buffers
+    void captureOutputSamplesB (int numSamples);
+
+    // Phase 3.7: Before-After snapshot storage (protected by resultMutex)
+    std::vector<std::pair<float,float>> snapshotFreqResponse;
+    bool hasSnapshot { false };
 
     //==========================================================================
     // Phase 3.6: Dynamics Analysis Engine

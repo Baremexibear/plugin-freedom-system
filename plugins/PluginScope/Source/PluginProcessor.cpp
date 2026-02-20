@@ -20,7 +20,23 @@ public:
     void run() override
     {
         // Ensure data directory exists before writing dead man's pedal / cache
-        ownerProcessor.getScanCacheFile().getParentDirectory().createDirectory();
+        auto pedalFile = ownerProcessor.getDeadMansPedalFile();
+        pedalFile.getParentDirectory().createDirectory();
+
+        // SELF-EXCLUSION: Write our own bundle path to the dead man's pedal BEFORE
+        // creating any PluginDirectoryScanner. The scanner reads the pedal file in its
+        // constructor and skips listed paths. Without this, the scanner loads
+        // PluginScope.vst3 inside PluginScope, creating a recursive instantiation crash.
+        //
+        // On macOS the executable lives at:
+        //   .../PluginScope.vst3/Contents/MacOS/PluginScope   (3 dirs up = .vst3 bundle)
+        //   .../PluginScope.component/Contents/MacOS/PluginScope
+        auto selfExe = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
+        auto selfBundle = selfExe.getParentDirectory()   // MacOS/
+                                 .getParentDirectory()   // Contents/
+                                 .getParentDirectory();  // PluginScope.vst3  (or .component)
+        if (selfBundle.exists())
+            pedalFile.replaceWithText (selfBundle.getFullPathName());
 
         // Iterate over every registered format (VST3 + AU on macOS)
         for (int formatIdx = 0; formatIdx < ownerProcessor.formatManager.getNumFormats(); ++formatIdx)
@@ -45,27 +61,32 @@ public:
                 paths = format->getDefaultLocationsToSearch();
             }
 
+            // Scanner reads pedal file in constructor — our own bundle is already listed,
+            // so the scanner will skip PluginScope.vst3/.component automatically.
             juce::PluginDirectoryScanner scanner (
                 ownerProcessor.knownPluginList,
                 *format,
                 paths,
                 true,   // dontRescanIfAlreadyInList
-                ownerProcessor.getDeadMansPedalFile());
+                pedalFile);
 
             juce::String pluginBeingScanned;
             while (!threadShouldExit() && scanner.scanNextFile (true, pluginBeingScanned))
             {
                 ownerProcessor.scanScannedCount.fetch_add (1);
 
-                // Notify message thread of progress (lambda captures by reference;
-                // safe because destructor calls stopThread(3000) before ownerProcessor
-                // is destroyed)
+                // Post progress to message thread.
+                // Safe: ownerProcessor outlives the scan thread (stopped in destructor).
                 juce::MessageManager::callAsync ([&ownerRef = ownerProcessor]()
                 {
                     ownerRef.scanBroadcaster.sendChangeMessage();
                 });
             }
         }
+
+        // Clear dead man's pedal now that scan completed without crash.
+        // Next launch will re-populate it before the next scan.
+        pedalFile.replaceWithText ({});
 
         // Persist scan results to disk so subsequent launches skip the full scan
         {
@@ -322,7 +343,14 @@ void PluginScopeAudioProcessor::unloadPlugin()
 juce::Array<juce::PluginDescription> PluginScopeAudioProcessor::getKnownPlugins() const
 {
     // JUCE 8: getType(int) is deprecated — use getTypes() which returns Array<PluginDescription>
-    return knownPluginList.getTypes();
+    // Safety filter: exclude ourselves. Loading PluginScope inside PluginScope causes
+    // recursive instantiation. The dead man's pedal normally prevents this, but filter
+    // here as a second layer of defence.
+    juce::Array<juce::PluginDescription> result;
+    for (auto& desc : knownPluginList.getTypes())
+        if (! desc.name.equalsIgnoreCase ("PluginScope"))
+            result.add (desc);
+    return result;
 }
 
 //==============================================================================

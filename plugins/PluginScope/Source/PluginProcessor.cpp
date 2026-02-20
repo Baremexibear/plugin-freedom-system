@@ -481,6 +481,15 @@ void PluginScopeAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     // Re-prepare hosted plugin if one is already loaded
     if (hostedPlugin != nullptr && pluginReady.load())
         hostedPlugin->prepareToPlay (sampleRate, samplesPerBlock);
+
+    // Phase 3.2: Resize and reset the lock-free capture buffer
+    captureBuffer.setSize (2, kCaptureFifoSize);
+    captureBuffer.clear();
+    captureFifo.reset();
+
+    // Reset sweep state on sample rate change
+    sweepPhase    = 0.0f;
+    sweepPosition = 0.0f;
 }
 
 void PluginScopeAudioProcessor::releaseResources()
@@ -488,6 +497,47 @@ void PluginScopeAudioProcessor::releaseResources()
     // Release scratch buffers to save memory when plugin is not in use
     hostedInputBuffer .setSize (0, 0);
     hostedOutputBuffer.setSize (0, 0);
+    captureBuffer.setSize (0, 0);
+}
+
+//==============================================================================
+// Phase 3.2: Helper — write hostedOutputBuffer samples into the lock-free
+// capture FIFO so analysis engines (Phases 3.3+) can read them.
+// Called from processBlock() on the audio thread; must be lock-free.
+
+void PluginScopeAudioProcessor::captureOutputSamples (int numSamples)
+{
+    // We store two channels (L and R) using separate rows of captureBuffer.
+    // Each "slot" in the FIFO represents ONE sample for ONE channel, but we
+    // reserve pairs (L then R) so analysis engines always read aligned pairs.
+    // For simplicity in Phase 3.2 we just write numSamples slots per channel
+    // into captureBuffer row 0 (L) and row 1 (R) independently.  Phase 3.3
+    // will decide the exact convention when it reads.
+
+    const int numToWrite = juce::jmin (numSamples,
+                                       captureFifo.getFreeSpace() / 2);
+    if (numToWrite <= 0)
+        return;
+
+    int start1, size1, start2, size2;
+    captureFifo.prepareToWrite (numToWrite * 2, start1, size1, start2, size2);
+
+    // Write region 1 — interleave L/R into sequential FIFO indices
+    for (int i = 0; i < size1 / 2; ++i)
+    {
+        captureBuffer.setSample (0, start1 + i * 2,     hostedOutputBuffer.getSample (0, i));
+        captureBuffer.setSample (0, start1 + i * 2 + 1, hostedOutputBuffer.getSample (1, i));
+    }
+
+    // Write region 2 (wrap-around)
+    const int offset = size1 / 2;
+    for (int i = 0; i < size2 / 2; ++i)
+    {
+        captureBuffer.setSample (0, start2 + i * 2,     hostedOutputBuffer.getSample (0, offset + i));
+        captureBuffer.setSample (0, start2 + i * 2 + 1, hostedOutputBuffer.getSample (1, offset + i));
+    }
+
+    captureFifo.finishedWrite (numToWrite * 2);
 }
 
 //==============================================================================
@@ -497,27 +547,158 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     juce::ScopedNoDenormals noDenormals;
     juce::ignoreUnused (midiMessages);
 
+    const int numSamples  = buffer.getNumSamples();
+    const int numChannels = juce::jmin (buffer.getNumChannels(), 2);
+
     // Clear any unused output channels
     for (int i = getTotalNumInputChannels(); i < getTotalNumOutputChannels(); ++i)
-        buffer.clear (i, 0, buffer.getNumSamples());
+        buffer.clear (i, 0, numSamples);
 
-    // If a hosted plugin is ready, route audio through it (pass-through mode).
-    // In Phase 3.1 this serves as architectural validation.
-    // Measurement engines (Phases 3.2+) will inject test signals instead of
-    // the live DAW audio in most modes.
+    // Read active test signal mode (0-4, atomic load — real-time safe)
+    const int testSignalMode = static_cast<int> (testSignalParam->load());
+
+    // --- Detect test signal mode change ---
+    // Reset impulsePending when the user re-selects Impulse mode (index 3)
+    if (testSignalMode != previousTestSignalMode)
+    {
+        if (testSignalMode == 3)
+            impulsePending = true;
+        previousTestSignalMode = testSignalMode;
+    }
+
+    // -----------------------------------------------------------------------
+    // Mode 4: Live Audio — copy DAW input through the hosted plugin
+    // -----------------------------------------------------------------------
+    if (testSignalMode == 4)
+    {
+        if (pluginReady.load() && hostedPlugin != nullptr)
+        {
+            // Copy DAW input into hosted plugin's pre-allocated input buffer
+            for (int ch = 0; ch < numChannels; ++ch)
+                hostedInputBuffer.copyFrom (ch, 0, buffer, ch, 0, numSamples);
+
+            // Clear hosted output buffer before processing
+            hostedOutputBuffer.clear();
+
+            juce::MidiBuffer emptyMidi;
+            try
+            {
+                hostedPlugin->processBlock (hostedOutputBuffer, emptyMidi);
+            }
+            catch (...)
+            {
+                pluginReady.store (false);
+            }
+
+            if (pluginReady.load())
+            {
+                // Copy hosted output back to the DAW buffer
+                for (int ch = 0; ch < numChannels; ++ch)
+                    buffer.copyFrom (ch, 0, hostedOutputBuffer, ch, 0, numSamples);
+
+                // Capture output for analysis engines
+                captureOutputSamples (numSamples);
+            }
+        }
+        // If no hosted plugin in Live Audio mode: pass through unchanged
+        return;
+    }
+
+    // -----------------------------------------------------------------------
+    // Modes 0-3: Generated test signals — fill hostedInputBuffer, output silence
+    // -----------------------------------------------------------------------
+
+    const float levelScale = juce::Decibels::decibelsToGain (-12.0f);
+
+    switch (testSignalMode)
+    {
+        // --- Mode 0: Logarithmic Sine Sweep (20 Hz – 20 kHz) ---
+        case 0:
+        {
+            // Log-chirp formula: instantaneous frequency grows exponentially.
+            // K and L are constants derived from sweep duration and start/end freqs.
+            const float K = kSweepDurationSeconds / std::log (kSweepFEnd / kSweepFStart);
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float t = sweepPosition * kSweepDurationSeconds;
+                // Increment phase by 2*pi * instantaneous_frequency / sampleRate
+                sweepPhase += 2.0f * juce::MathConstants<float>::pi
+                              * kSweepFStart * std::exp (t / K)
+                              / static_cast<float> (currentSampleRate);
+
+                const float sample = std::sin (sweepPhase) * levelScale;
+                hostedInputBuffer.setSample (0, i, sample);
+                hostedInputBuffer.setSample (1, i, sample);
+
+                sweepPosition += 1.0f / (kSweepDurationSeconds
+                                         * static_cast<float> (currentSampleRate));
+                if (sweepPosition >= 1.0f)
+                {
+                    sweepPosition = 0.0f;
+                    sweepPhase    = 0.0f;   // Reset to prevent float overflow on loop
+                }
+            }
+            break;
+        }
+
+        // --- Mode 1: White Noise ---
+        case 1:
+        {
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float sample = (noiseRandom.nextFloat() * 2.0f - 1.0f) * levelScale;
+                hostedInputBuffer.setSample (0, i, sample);
+                hostedInputBuffer.setSample (1, i, sample);
+            }
+            break;
+        }
+
+        // --- Mode 2: Pink Noise (Paul Kellet 6-stage IIR) ---
+        case 2:
+        {
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float white = noiseRandom.nextFloat() * 2.0f - 1.0f;
+                pinkB0 = 0.99886f * pinkB0 + white * 0.0555179f;
+                pinkB1 = 0.99332f * pinkB1 + white * 0.0750759f;
+                pinkB2 = 0.96900f * pinkB2 + white * 0.1538520f;
+                pinkB3 = 0.86650f * pinkB3 + white * 0.3104856f;
+                pinkB4 = 0.55000f * pinkB4 + white * 0.5329522f;
+                pinkB5 = -0.7616f * pinkB5 - white * 0.0168980f;
+                float pink = (pinkB0 + pinkB1 + pinkB2 + pinkB3
+                              + pinkB4 + pinkB5 + pinkB6 + white * 0.5362f) * 0.11f;
+                pinkB6 = white * 0.115926f;
+                pink  *= levelScale;
+                hostedInputBuffer.setSample (0, i, pink);
+                hostedInputBuffer.setSample (1, i, pink);
+            }
+            break;
+        }
+
+        // --- Mode 3: Impulse (Dirac delta) ---
+        case 3:
+        {
+            hostedInputBuffer.clear();
+            if (impulsePending)
+            {
+                hostedInputBuffer.setSample (0, 0, levelScale);
+                hostedInputBuffer.setSample (1, 0, levelScale);
+                impulsePending = false;   // One-shot; reset when mode is re-selected
+            }
+            break;
+        }
+
+        default:
+            hostedInputBuffer.clear();
+            break;
+    }
+
+    // --- Route test signal through hosted plugin (if ready) and capture output ---
     if (pluginReady.load() && hostedPlugin != nullptr)
     {
-        const int numSamples   = buffer.getNumSamples();
-        const int numChannels  = juce::jmin (buffer.getNumChannels(), 2);
-
-        // Copy DAW input into hosted plugin's pre-allocated input buffer
-        for (int ch = 0; ch < numChannels; ++ch)
-            hostedInputBuffer.copyFrom (ch, 0, buffer, ch, 0, numSamples);
-
-        // Clear hosted output buffer before processing
         hostedOutputBuffer.clear();
 
-        // Run hosted plugin on the audio thread — real-time safe
         juce::MidiBuffer emptyMidi;
         try
         {
@@ -525,20 +706,15 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         }
         catch (...)
         {
-            // Hosted plugin crashed — disable it safely and let audio pass-through
             pluginReady.store (false);
         }
 
-        // Copy hosted output back to the DAW buffer (if plugin is still ready)
-        if (pluginReady.load())
-        {
-            for (int ch = 0; ch < numChannels; ++ch)
-                buffer.copyFrom (ch, 0, hostedOutputBuffer, ch, 0, numSamples);
-        }
+        // Capture output for analysis engines (Phases 3.3+)
+        captureOutputSamples (numSamples);
     }
 
-    // If no hosted plugin: pass-through DAW audio unchanged (neutral behaviour)
-    // PluginScope does NOT modify the audio stream when acting as an analyser.
+    // Output SILENCE to the DAW — PluginScope does not emit test signals downstream
+    buffer.clear();
 }
 
 //==============================================================================

@@ -63,6 +63,11 @@ public:
     void startPluginScan();
 
     //==========================================================================
+    // Phase 3.2: Capture buffer accessors (read by analysis thread in Phases 3.3+)
+    juce::AbstractFifo&       getCaptureFifo()   { return captureFifo; }
+    juce::AudioBuffer<float>& getCaptureBuffer() { return captureBuffer; }
+
+    //==========================================================================
     // Phase 3.1: Plugin Hosting Engine — public atomic state
 
     // Lifetime sentinel: shared_ptr shared with all callAsync lambdas.
@@ -88,6 +93,9 @@ public:
 private:
     //==========================================================================
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+
+    // Phase 3.2: Write numSamples from hostedOutputBuffer into the lock-free capture FIFO
+    void captureOutputSamples (int numSamples);
 
     // Cached atomic parameter value pointers (set in prepareToPlay for efficiency)
     // All 5 parameters are AudioParameterChoice — values are stored as float indices
@@ -116,6 +124,32 @@ private:
     // Cached sample rate and block size (set in prepareToPlay, read by plugin loading code)
     double currentSampleRate { 44100.0 };
     int    currentBlockSize  { 512 };
+
+    //==========================================================================
+    // Phase 3.2: Test Signal Generator state
+    // (all pre-allocated, no heap allocation in processBlock)
+
+    // Logarithmic sine sweep state
+    float sweepPhase    { 0.0f };
+    float sweepPosition { 0.0f };   // [0, 1] across full sweep duration
+    static constexpr float kSweepDurationSeconds = 3.0f;
+    static constexpr float kSweepFStart          = 20.0f;
+    static constexpr float kSweepFEnd            = 20000.0f;
+
+    // Pink noise state (Paul Kellet 6-stage IIR)
+    float pinkB0 { 0.0f }, pinkB1 { 0.0f }, pinkB2 { 0.0f },
+          pinkB3 { 0.0f }, pinkB4 { 0.0f }, pinkB5 { 0.0f }, pinkB6 { 0.0f };
+    juce::Random noiseRandom;
+
+    // Impulse state
+    bool impulsePending        { true };  // true = next processBlock fires the impulse
+    int  previousTestSignalMode { -1 };   // For detecting test signal type changes
+
+    // Phase 3.2: Lock-free output capture buffer (audio thread -> analysis thread)
+    // Sized for 1 full second at the highest likely sample rate (192kHz x 2ch)
+    static constexpr int kCaptureFifoSize = 192000 * 2;   // samples (interleaved stereo)
+    juce::AbstractFifo       captureFifo   { kCaptureFifoSize };
+    juce::AudioBuffer<float> captureBuffer;   // Sized in prepareToPlay
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginScopeAudioProcessor)
 };

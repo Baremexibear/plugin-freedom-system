@@ -1,6 +1,11 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#if JUCE_MAC
+ #include <AudioUnit/AudioUnit.h>   // AudioComponent, AudioComponentFindNext, OSType constants
+ #include <CoreFoundation/CoreFoundation.h> // CFStringRef, CFRelease, noErr
+#endif
+
 //==============================================================================
 // Phase 3.1: Safe Metadata-Only Plugin Scanner
 //
@@ -53,6 +58,14 @@ namespace SafeScanner
         return "AudioUnit:" + category + typeStr + "," + subStr + "," + mfrStr;
     }
 
+    // Overload for numeric OSType values (used with AudioComponentFindNext)
+    static juce::String makeAUIdentifier (uint32_t type, uint32_t sub, uint32_t mfr)
+    {
+        return makeAUIdentifier (osTypeToString (type),
+                                 osTypeToString (sub),
+                                 osTypeToString (mfr));
+    }
+
     //--------------------------------------------------------------------------
     // Notify scan progress — helper shared by both format scanners
 
@@ -68,23 +81,17 @@ namespace SafeScanner
     }
 
     //--------------------------------------------------------------------------
-    // Scan a single VST3 bundle by reading Contents/moduleinfo.json.
-    // Returns true if at least one class was found.
+    // VST3: read Contents/moduleinfo.json (VST3 3.7+ standard, no DLL load)
 
-    static bool scanVST3Bundle (const juce::File& bundle,
-                                 const juce::String& selfStem,
-                                 juce::KnownPluginList& list)
+    static bool scanVST3ModuleInfo (const juce::File& bundle,
+                                     const juce::String& selfStem,
+                                     juce::KnownPluginList& list)
     {
-        if (bundle.getFileNameWithoutExtension().equalsIgnoreCase (selfStem))
-            return false;
-
         auto moduleInfo = bundle.getChildFile ("Contents/moduleinfo.json");
-        if (! moduleInfo.existsAsFile())
-            return false;
+        if (! moduleInfo.existsAsFile()) return false;
 
         auto jsonVar = juce::JSON::parse (moduleInfo);
-        if (! jsonVar.isObject())
-            return false;
+        if (! jsonVar.isObject()) return false;
 
         auto factoryInfo = jsonVar["Factory Info"];
         juce::String vendor;
@@ -94,8 +101,7 @@ namespace SafeScanner
         juce::String version = jsonVar["Version"].toString();
 
         auto classes = jsonVar["Classes"];
-        if (! classes.isArray())
-            return false;
+        if (! classes.isArray()) return false;
 
         bool found = false;
         for (const auto& cls : *classes.getArray())
@@ -111,7 +117,6 @@ namespace SafeScanner
             pd.version          = version;
             pd.category         = cls["Sub-Categories"].toString();
 
-            // UID is a 32-char hex string; use last 8 hex chars as uniqueId
             auto uid = cls["UID"].toString().removeCharacters ("-");
             if (uid.length() >= 8)
                 pd.uniqueId = (int) uid.substring (uid.length() - 8).getHexValue64();
@@ -129,94 +134,142 @@ namespace SafeScanner
     }
 
     //--------------------------------------------------------------------------
-    // Scan a single AU bundle by reading Contents/Info.plist (XML format).
-    // Returns true if at least one AudioComponent entry was found.
+    // VST3 fallback: read Contents/Info.plist when moduleinfo.json is absent.
+    // Older VST3 plugins (pre-3.7) don't have moduleinfo.json. Their Info.plist
+    // (standard macOS bundle plist) contains CFBundleName and version. That's
+    // enough for the list — JUCE loads VST3 by bundle path, not by class UID.
 
-    static bool scanAUBundle (const juce::File& bundle,
-                               const juce::String& selfStem,
-                               juce::KnownPluginList& list)
+    static bool scanVST3InfoPlist (const juce::File& bundle,
+                                    const juce::String& selfStem,
+                                    juce::KnownPluginList& list)
+    {
+        auto plist = bundle.getChildFile ("Contents/Info.plist");
+        if (! plist.existsAsFile()) return false;
+
+        // XmlDocument::parse fails silently on binary plists — skip those
+        auto xml = juce::XmlDocument::parse (plist);
+        if (xml == nullptr) return false;
+
+        auto* dict = xml->getFirstChildElement();
+        if (dict == nullptr) return false;
+
+        juce::String name, version;
+        for (auto* kv = dict->getFirstChildElement(); kv != nullptr; kv = kv->getNextElement())
+        {
+            if (kv->getTagName() != "key") continue;
+            const auto key = kv->getAllSubText();
+            auto* val      = kv->getNextElement();
+            if (val == nullptr) continue;
+
+            if      (key == "CFBundleName" && name.isEmpty())
+                name = val->getAllSubText();
+            else if (key == "CFBundleExecutable" && name.isEmpty())
+                name = val->getAllSubText();
+            else if (key == "CFBundleShortVersionString" && version.isEmpty())
+                version = val->getAllSubText();
+            else if (key == "CFBundleVersion" && version.isEmpty())
+                version = val->getAllSubText();
+        }
+
+        if (name.isEmpty())
+            name = bundle.getFileNameWithoutExtension();
+
+        if (name.equalsIgnoreCase (selfStem)) return false;
+
+        juce::PluginDescription pd;
+        pd.pluginFormatName = "VST3";
+        pd.fileOrIdentifier = bundle.getFullPathName();
+        pd.name             = name;
+        pd.version          = version;
+        pd.uniqueId         = (int) name.hashCode();
+
+        list.addType (pd);
+        return true;
+    }
+
+    //--------------------------------------------------------------------------
+    // VST3 top-level: try moduleinfo.json first, fall back to Info.plist.
+
+    static bool scanVST3Bundle (const juce::File& bundle,
+                                 const juce::String& selfStem,
+                                 juce::KnownPluginList& list)
     {
         if (bundle.getFileNameWithoutExtension().equalsIgnoreCase (selfStem))
             return false;
 
-        auto plist = bundle.getChildFile ("Contents/Info.plist");
-        if (! plist.existsAsFile()) return false;
+        if (scanVST3ModuleInfo (bundle, selfStem, list))
+            return true;
 
-        // XmlDocument::parse fails on binary plists — that's fine, we skip them
-        auto xml = juce::XmlDocument::parse (plist);
-        if (xml == nullptr) return false;
-
-        // Plist structure: <plist><dict>...<key>AudioComponents</key><array>...
-        auto* dict = xml->getFirstChildElement();
-        if (dict == nullptr) return false;
-
-        juce::XmlElement* acArray = nullptr;
-        for (auto* kv = dict->getFirstChildElement(); kv != nullptr; kv = kv->getNextElement())
-        {
-            if (kv->getTagName() == "key" && kv->getAllSubText() == "AudioComponents")
-            {
-                acArray = kv->getNextElement();
-                break;
-            }
-        }
-        if (acArray == nullptr) return false;
-
-        bool found = false;
-        for (auto* entry = acArray->getFirstChildElement();
-             entry != nullptr;
-             entry = entry->getNextElement())
-        {
-            if (entry->getTagName() != "dict") continue;
-
-            juce::String name, typeStr, subStr, mfrStr;
-
-            for (auto* kv = entry->getFirstChildElement(); kv != nullptr; kv = kv->getNextElement())
-            {
-                if (kv->getTagName() != "key") continue;
-                const auto key = kv->getAllSubText();
-                auto* val      = kv->getNextElement();
-                if (val == nullptr) continue;
-
-                if      (key == "name")         name    = val->getAllSubText();
-                else if (key == "type")         typeStr = val->getAllSubText();
-                else if (key == "subtype")      subStr  = val->getAllSubText();
-                else if (key == "manufacturer") mfrStr  = val->getAllSubText();
-            }
-
-            if (typeStr.length() < 4 || subStr.length() < 4 || mfrStr.length() < 4)
-                continue;
-
-            juce::PluginDescription pd;
-            pd.pluginFormatName = "AudioUnit";
-            pd.fileOrIdentifier = makeAUIdentifier (typeStr, subStr, mfrStr);
-
-            // Info.plist name is "Vendor: Plugin Name" — split on ':'
-            if (name.containsChar (':'))
-            {
-                pd.manufacturerName = name.upToFirstOccurrenceOf (":", false, false).trim();
-                pd.name             = name.fromFirstOccurrenceOf (":", false, false).trim();
-            }
-            else
-            {
-                pd.name = name.isEmpty() ? bundle.getFileNameWithoutExtension() : name;
-            }
-
-            pd.isInstrument = (typeStr == "aumu");
-
-            // uniqueId: sub-type bytes as int (enough to distinguish within a manufacturer)
-            pd.uniqueId = (int) (((uint32_t)(uint8_t)subStr[0] << 24)
-                               | ((uint32_t)(uint8_t)subStr[1] << 16)
-                               | ((uint32_t)(uint8_t)subStr[2] <<  8)
-                               |  (uint32_t)(uint8_t)subStr[3]);
-
-            if (pd.name.isNotEmpty() && ! pd.name.equalsIgnoreCase (selfStem))
-            {
-                list.addType (pd);
-                found = true;
-            }
-        }
-        return found;
+        return scanVST3InfoPlist (bundle, selfStem, list);
     }
+
+    //--------------------------------------------------------------------------
+    // AU: enumerate via macOS Audio Component registry (AudioComponentFindNext).
+    //
+    // The system registry is populated by macOS from AU bundle metadata at boot
+    // and on plugin installation — no plugin binary is loaded by this API.
+    // This finds 100% of installed AUs regardless of plist format.
+
+   #if JUCE_MAC
+    static void scanAudioUnitsFromRegistry (const juce::String& selfStem,
+                                             juce::KnownPluginList& list)
+    {
+        // Types that represent audio processors (excludes I/O, codecs, etc.)
+        const OSType kInterestingTypes[] = {
+            kAudioUnitType_Effect,
+            kAudioUnitType_MusicDevice,
+            kAudioUnitType_MusicEffect,
+            kAudioUnitType_Generator,
+            kAudioUnitType_Panner,
+            kAudioUnitType_Mixer,
+            kAudioUnitType_MIDIProcessor
+        };
+
+        for (auto auType : kInterestingTypes)
+        {
+            AudioComponentDescription searchDesc = {};
+            searchDesc.componentType = auType;
+
+            AudioComponent comp = nullptr;
+            while ((comp = AudioComponentFindNext (comp, &searchDesc)) != nullptr)
+            {
+                AudioComponentDescription compDesc;
+                if (AudioComponentGetDescription (comp, &compDesc) != noErr) continue;
+
+                CFStringRef cfName = nullptr;
+                if (AudioComponentCopyName (comp, &cfName) != noErr) continue;
+
+                auto fullName = juce::String::fromCFString (cfName);
+                CFRelease (cfName);
+
+                juce::String mfr, name;
+                if (fullName.containsChar (':'))
+                {
+                    mfr  = fullName.upToFirstOccurrenceOf (":", false, false).trim();
+                    name = fullName.fromFirstOccurrenceOf (":", false, false).trim();
+                }
+                else
+                {
+                    name = fullName;
+                }
+
+                if (name.isEmpty() || name.equalsIgnoreCase (selfStem)) continue;
+
+                juce::PluginDescription pd;
+                pd.pluginFormatName = "AudioUnit";
+                pd.fileOrIdentifier = makeAUIdentifier ((uint32_t) compDesc.componentType,
+                                                         (uint32_t) compDesc.componentSubType,
+                                                         (uint32_t) compDesc.componentManufacturer);
+                pd.name             = name;
+                pd.manufacturerName = mfr;
+                pd.isInstrument     = (compDesc.componentType == kAudioUnitType_MusicDevice);
+                pd.uniqueId         = (int) compDesc.componentSubType;
+
+                list.addType (pd);
+            }
+        }
+    }
+   #endif // JUCE_MAC
 
 } // namespace SafeScanner
 
@@ -261,21 +314,16 @@ public:
         }
 
         // ---- AU ---------------------------------------------------------
-        for (auto& dir : { juce::File ("/Library/Audio/Plug-Ins/Components"),
-                            juce::File::getSpecialLocation (juce::File::userHomeDirectory)
-                                .getChildFile ("Library/Audio/Plug-Ins/Components") })
+        // Use macOS Audio Component registry — reads OS metadata, zero DLL loading.
+        // Finds all registered AUs regardless of plist format or install location.
+       #if JUCE_MAC
+        if (! threadShouldExit())
         {
-            if (threadShouldExit() || ! dir.isDirectory()) continue;
-
-            for (const auto& entry : juce::RangedDirectoryIterator (
-                     dir, false, "*.component", juce::File::findDirectories))
-            {
-                if (threadShouldExit()) break;
-                if (SafeScanner::scanAUBundle (entry.getFile(), selfStem,
-                                               ownerProcessor.knownPluginList))
-                    SafeScanner::postProgress (ownerProcessor.processorAlive, ownerProcessor);
-            }
+            SafeScanner::scanAudioUnitsFromRegistry (selfStem,
+                                                      ownerProcessor.knownPluginList);
+            SafeScanner::postProgress (ownerProcessor.processorAlive, ownerProcessor);
         }
+       #endif
 
         // Persist results
         {

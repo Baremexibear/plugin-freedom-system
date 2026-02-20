@@ -23,20 +23,27 @@ public:
         auto pedalFile = ownerProcessor.getDeadMansPedalFile();
         pedalFile.getParentDirectory().createDirectory();
 
-        // SELF-EXCLUSION: Write our own bundle path to the dead man's pedal BEFORE
-        // creating any PluginDirectoryScanner. The scanner reads the pedal file in its
-        // constructor and skips listed paths. Without this, the scanner loads
-        // PluginScope.vst3 inside PluginScope, creating a recursive instantiation crash.
+        // SELF-EXCLUSION (per-format):
         //
-        // On macOS the executable lives at:
-        //   .../PluginScope.vst3/Contents/MacOS/PluginScope   (3 dirs up = .vst3 bundle)
-        //   .../PluginScope.component/Contents/MacOS/PluginScope
-        auto selfExe = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
+        // The dead man's pedal file holds ONE path; PluginDirectoryScanner reads it
+        // in its constructor and skips that path. We must write the bundle extension
+        // that MATCHES the format being scanned:
+        //   - VST3 scanner  → skip PluginScope.vst3
+        //   - AU  scanner   → skip PluginScope.component
+        //
+        // If PluginScope is running as VST3 and we only wrote the .vst3 path, the AU
+        // scanner would still find and load PluginScope.component, triggering a
+        // recursive instantiation crash. Writing the format-appropriate path before
+        // each scanner construction prevents this.
+        //
+        // selfBundle = the bundle we are currently executing from.
+        // bundleParent / bundleStem let us derive sibling bundles of other formats.
+        auto selfExe    = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
         auto selfBundle = selfExe.getParentDirectory()   // MacOS/
                                  .getParentDirectory()   // Contents/
-                                 .getParentDirectory();  // PluginScope.vst3  (or .component)
-        if (selfBundle.exists())
-            pedalFile.replaceWithText (selfBundle.getFullPathName());
+                                 .getParentDirectory();  // PluginScope.{vst3,component}
+        auto bundleParent = selfBundle.getParentDirectory();
+        auto bundleStem   = selfBundle.getFileNameWithoutExtension(); // "PluginScope"
 
         // Iterate over every registered format (VST3 + AU on macOS)
         for (int formatIdx = 0; formatIdx < ownerProcessor.formatManager.getNumFormats(); ++formatIdx)
@@ -45,6 +52,23 @@ public:
                 break;
 
             auto* format = ownerProcessor.formatManager.getFormat (formatIdx);
+
+            // Write the self-bundle for THIS format to the dead man's pedal BEFORE
+            // creating the scanner — the scanner reads the pedal in its constructor.
+            {
+                juce::String selfExt;
+                if (format->getName().containsIgnoreCase ("VST3"))
+                    selfExt = ".vst3";
+                else if (format->getName().containsIgnoreCase ("AU") ||
+                         format->getName().containsIgnoreCase ("AudioUnit"))
+                    selfExt = ".component";
+
+                auto targetBundle = bundleParent.getChildFile (bundleStem + selfExt);
+                if (targetBundle.exists())
+                    pedalFile.replaceWithText (targetBundle.getFullPathName());
+                else if (selfBundle.exists())
+                    pedalFile.replaceWithText (selfBundle.getFullPathName()); // fallback
+            }
 
             // Build search paths per format
             juce::FileSearchPath paths;
@@ -61,8 +85,8 @@ public:
                 paths = format->getDefaultLocationsToSearch();
             }
 
-            // Scanner reads pedal file in constructor — our own bundle is already listed,
-            // so the scanner will skip PluginScope.vst3/.component automatically.
+            // Scanner reads pedal file in constructor — the format-specific self-bundle
+            // is now in the pedal, so the scanner skips it automatically.
             juce::PluginDirectoryScanner scanner (
                 ownerProcessor.knownPluginList,
                 *format,

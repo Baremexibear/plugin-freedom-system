@@ -380,7 +380,7 @@ public:
         while (! threadShouldExit())
         {
             // Guard against analysisModeParam being null before prepareToPlay() is called
-            if (proc.analysisModeParam == nullptr)
+            if (proc.analysisModeParam == nullptr || proc.analysisTypeParam == nullptr)
             {
                 juce::Thread::sleep (20);
                 continue;
@@ -394,80 +394,189 @@ public:
                 continue;
             }
 
-            // Wait until both FIFOs contain at least one full FFT frame
-            const int needed = proc.kFftSize;
-            if (proc.captureFifo.getNumReady() / 2 < needed ||
-                proc.dryCaptureFifo.getNumReady() / 2 < needed)
+            const int analysisType = static_cast<int> (proc.analysisTypeParam->load());
+
+            if (analysisType == 0)   // Frequency Response (Phase 3.3)
             {
-                juce::Thread::sleep (10);
-                continue;
+                computeFrequencyResponse();
             }
-
-            // Read kFftSize mono samples (left channel) from each FIFO
-            proc.readFifoIntoBuffer (proc.captureFifo,    proc.captureBuffer,
-                                     proc.fftWetBuf.data(), needed);
-            proc.readFifoIntoBuffer (proc.dryCaptureFifo, proc.dryCaptureBuffer,
-                                     proc.fftDryBuf.data(), needed);
-
-            // Apply Hann window to reduce spectral leakage
-            proc.window.multiplyWithWindowingTable (proc.fftWetBuf.data(), (size_t) proc.kFftSize);
-            proc.window.multiplyWithWindowingTable (proc.fftDryBuf.data(), (size_t) proc.kFftSize);
-
-            // Forward real FFT — output is interleaved Re/Im pairs (bin 0 … N/2)
-            proc.fft.performRealOnlyForwardTransform (proc.fftWetBuf.data(), true);
-            proc.fft.performRealOnlyForwardTransform (proc.fftDryBuf.data(), true);
-
-            // Compute transfer function H(f) = Wet / Dry per bin, extract |H| in dB
-            const float sampleRate = static_cast<float> (proc.currentSampleRate);
-            std::vector<std::pair<float,float>> frame (proc.kFreqBins);
-
-            for (int bin = 0; bin < proc.kFreqBins; ++bin)
+            else if (analysisType == 2)   // Harmonic Distortion (Phase 3.4)
             {
-                const float binHz = static_cast<float> (bin) * sampleRate
-                                    / static_cast<float> (proc.kFftSize);
-
-                const float wetRe = proc.fftWetBuf[bin * 2];
-                const float wetIm = proc.fftWetBuf[bin * 2 + 1];
-                const float dryRe = proc.fftDryBuf[bin * 2];
-                const float dryIm = proc.fftDryBuf[bin * 2 + 1];
-
-                // H(f) = Wet / Dry (complex division)
-                const float dryMagSq = dryRe * dryRe + dryIm * dryIm + 1e-20f;
-                const float hRe = (wetRe * dryRe + wetIm * dryIm) / dryMagSq;
-                const float hIm = (wetIm * dryRe - wetRe * dryIm) / dryMagSq;
-                const float hMag = std::sqrt (hRe * hRe + hIm * hIm);
-
-                frame[bin] = { binHz, 20.0f * std::log10 (hMag + 1e-10f) };
-            }
-
-            // 32-frame exponential moving average
-            proc.freqResponseFrameCount++;
-            if (proc.freqResponseFrameCount == 1 ||
-                (int) proc.freqResponseAccum.size() != proc.kFreqBins)
-            {
-                proc.freqResponseAccum = frame;
+                computeThdMeasurement();
             }
             else
             {
-                const float alpha = 1.0f / static_cast<float> (
-                    juce::jmin (proc.freqResponseFrameCount, 32));
-                for (int bin = 0; bin < proc.kFreqBins; ++bin)
-                    proc.freqResponseAccum[bin].second +=
-                        alpha * (frame[bin].second - proc.freqResponseAccum[bin].second);
+                juce::Thread::sleep (20);   // Other analysis types not yet implemented
             }
-
-            // Publish result (lock protected — read by UI thread via getFreqResponse())
-            {
-                const juce::ScopedLock lock (proc.resultMutex);
-                proc.freqResponseResult = proc.freqResponseAccum;
-            }
-
-            juce::Thread::sleep (5);   // ~200 Hz max analysis rate; UI will throttle further
         }
     }
 
 private:
     PluginScopeAudioProcessor& proc;
+
+    //==========================================================================
+    // Phase 3.3: Frequency response computation (extracted from original run())
+
+    void computeFrequencyResponse()
+    {
+        // Wait until both FIFOs contain at least one full FFT frame
+        const int needed = proc.kFftSize;
+        if (proc.captureFifo.getNumReady() / 2 < needed ||
+            proc.dryCaptureFifo.getNumReady() / 2 < needed)
+        {
+            juce::Thread::sleep (10);
+            return;
+        }
+
+        // Read kFftSize mono samples (left channel) from each FIFO
+        proc.readFifoIntoBuffer (proc.captureFifo,    proc.captureBuffer,
+                                 proc.fftWetBuf.data(), needed);
+        proc.readFifoIntoBuffer (proc.dryCaptureFifo, proc.dryCaptureBuffer,
+                                 proc.fftDryBuf.data(), needed);
+
+        // Apply Hann window to reduce spectral leakage
+        proc.window.multiplyWithWindowingTable (proc.fftWetBuf.data(), (size_t) proc.kFftSize);
+        proc.window.multiplyWithWindowingTable (proc.fftDryBuf.data(), (size_t) proc.kFftSize);
+
+        // Forward real FFT — output is interleaved Re/Im pairs (bin 0 … N/2)
+        proc.fft.performRealOnlyForwardTransform (proc.fftWetBuf.data(), true);
+        proc.fft.performRealOnlyForwardTransform (proc.fftDryBuf.data(), true);
+
+        // Compute transfer function H(f) = Wet / Dry per bin, extract |H| in dB
+        const float sampleRate = static_cast<float> (proc.currentSampleRate);
+        std::vector<std::pair<float,float>> frame (proc.kFreqBins);
+
+        for (int bin = 0; bin < proc.kFreqBins; ++bin)
+        {
+            const float binHz = static_cast<float> (bin) * sampleRate
+                                / static_cast<float> (proc.kFftSize);
+
+            const float wetRe = proc.fftWetBuf[bin * 2];
+            const float wetIm = proc.fftWetBuf[bin * 2 + 1];
+            const float dryRe = proc.fftDryBuf[bin * 2];
+            const float dryIm = proc.fftDryBuf[bin * 2 + 1];
+
+            // H(f) = Wet / Dry (complex division)
+            const float dryMagSq = dryRe * dryRe + dryIm * dryIm + 1e-20f;
+            const float hRe = (wetRe * dryRe + wetIm * dryIm) / dryMagSq;
+            const float hIm = (wetIm * dryRe - wetRe * dryIm) / dryMagSq;
+            const float hMag = std::sqrt (hRe * hRe + hIm * hIm);
+
+            frame[bin] = { binHz, 20.0f * std::log10 (hMag + 1e-10f) };
+        }
+
+        // 32-frame exponential moving average
+        proc.freqResponseFrameCount++;
+        if (proc.freqResponseFrameCount == 1 ||
+            (int) proc.freqResponseAccum.size() != proc.kFreqBins)
+        {
+            proc.freqResponseAccum = frame;
+        }
+        else
+        {
+            const float alpha = 1.0f / static_cast<float> (
+                juce::jmin (proc.freqResponseFrameCount, 32));
+            for (int bin = 0; bin < proc.kFreqBins; ++bin)
+                proc.freqResponseAccum[bin].second +=
+                    alpha * (frame[bin].second - proc.freqResponseAccum[bin].second);
+        }
+
+        // Publish result (lock protected — read by UI thread via getFreqResponse())
+        {
+            const juce::ScopedLock lock (proc.resultMutex);
+            proc.freqResponseResult = proc.freqResponseAccum;
+        }
+
+        juce::Thread::sleep (5);   // ~200 Hz max analysis rate; UI will throttle further
+    }
+
+    //==========================================================================
+    // Phase 3.4: THD harmonic distortion computation
+
+    void computeThdMeasurement()
+    {
+        // Need kFftSize wet samples
+        const int needed = proc.kFftSize;
+        if (proc.captureFifo.getNumReady() / 2 < needed)
+        {
+            juce::Thread::sleep (10);
+            return;
+        }
+
+        // Read wet output into work buffer
+        proc.readFifoIntoBuffer (proc.captureFifo, proc.captureBuffer,
+                                 proc.fftWetBuf.data(), needed);
+
+        // Discard dry FIFO contents (1 kHz sine — we don't need dry for THD)
+        if (proc.dryCaptureFifo.getNumReady() / 2 >= needed)
+        {
+            int s1, sz1, s2, sz2;
+            proc.dryCaptureFifo.prepareToRead (needed * 2, s1, sz1, s2, sz2);
+            proc.dryCaptureFifo.finishedRead (sz1 + sz2);
+        }
+
+        // Apply flat-top window (amplitude accuracy over frequency resolution)
+        proc.windowFlatTop.multiplyWithWindowingTable (proc.fftWetBuf.data(),
+                                                       (size_t) proc.kFftSize);
+
+        // Forward real FFT — output is interleaved Re/Im pairs
+        proc.fft.performRealOnlyForwardTransform (proc.fftWetBuf.data(), true);
+
+        // Bin spacing at current sample rate
+        const float sampleRate = static_cast<float> (proc.currentSampleRate);
+        const float binHz      = sampleRate / static_cast<float> (proc.kFftSize);
+
+        // Helper: get peak magnitude in a ±2-bin window around a target frequency
+        auto getMagAtFreq = [&] (float targetHz) -> float
+        {
+            const int centerBin = static_cast<int> (std::round (targetHz / binHz));
+            const int lo = juce::jmax (0, centerBin - 2);
+            const int hi = juce::jmin (proc.kFreqBins - 1, centerBin + 2);
+            float peak = 0.0f;
+            for (int b = lo; b <= hi; ++b)
+            {
+                const float re  = proc.fftWetBuf[static_cast<size_t> (b * 2)];
+                const float im  = proc.fftWetBuf[static_cast<size_t> (b * 2 + 1)];
+                const float mag = std::sqrt (re * re + im * im);
+                if (mag > peak) peak = mag;
+            }
+            return peak;
+        };
+
+        // Extract H1..H8 (stop at Nyquist)
+        const float nyquist = sampleRate * 0.5f;
+        std::vector<std::pair<int,float>> harmonics;
+        harmonics.reserve (8);
+
+        float h1Linear      = 1e-10f;
+        float harmonicSumSq = 0.0f;
+
+        for (int n = 1; n <= 8; ++n)
+        {
+            const float freqHz = proc.kThdFundamental * static_cast<float> (n);
+            if (freqHz >= nyquist) break;
+
+            const float mag    = getMagAtFreq (freqHz);
+            const float mag_db = 20.0f * std::log10 (mag + 1e-10f);
+            harmonics.push_back ({ n, mag_db });
+
+            if (n == 1)
+                h1Linear = mag + 1e-10f;
+            else
+                harmonicSumSq += mag * mag;
+        }
+
+        const float thd = std::sqrt (harmonicSumSq) / h1Linear * 100.0f;
+
+        // Publish results (protected by the shared resultMutex)
+        {
+            const juce::ScopedLock lock (proc.resultMutex);
+            proc.thdHarmonics = harmonics;
+            proc.thdPercent   = thd;
+        }
+
+        juce::Thread::sleep (100);   // THD updates at ~10 Hz (slow measurement)
+    }
 };
 
 //==============================================================================
@@ -569,6 +678,9 @@ PluginScopeAudioProcessor::PluginScopeAudioProcessor()
     freqResponseResult.resize ((size_t) kFreqBins, { 0.0f, 0.0f });
     freqResponseAccum .resize ((size_t) kFreqBins, { 0.0f, 0.0f });
 
+    // Phase 3.4: Pre-allocate THD result storage (up to 8 harmonics)
+    thdHarmonics.reserve (8);
+
     // Start background FFT analysis thread (low priority — never blocks audio)
     analysisThreadShouldRun.store (true);
     analysisThread = std::make_unique<FrequencyAnalysisThread> (*this);
@@ -631,6 +743,9 @@ void PluginScopeAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     // Reset sweep state on sample rate change
     sweepPhase    = 0.0f;
     sweepPosition = 0.0f;
+
+    // Phase 3.4: Reset THD sine generator phase
+    thdSinePhase = 0.0f;
 }
 
 void PluginScopeAudioProcessor::releaseResources()
@@ -751,6 +866,22 @@ std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getFreqResponse()
 }
 
 //==============================================================================
+// Phase 3.4: THD result accessors — thread-safe reads of thdHarmonics/thdPercent.
+// Both protected by resultMutex (same lock used by freqResponseResult).
+
+std::vector<std::pair<int,float>> PluginScopeAudioProcessor::getThdHarmonics() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return thdHarmonics;
+}
+
+float PluginScopeAudioProcessor::getThdPercent() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return thdPercent;
+}
+
+//==============================================================================
 void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                                                juce::MidiBuffer& midiMessages)
 {
@@ -815,6 +946,54 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         }
         // If no hosted plugin in Live Audio mode: pass through unchanged
         return;
+    }
+
+    // -----------------------------------------------------------------------
+    // THD override: when analysis_type == 2 (Harmonic Distortion), inject a
+    // spectrally pure 1 kHz sine regardless of the test_signal parameter.
+    // This block handles capture and early-return so normal signal path is skipped.
+    // -----------------------------------------------------------------------
+    {
+        const int analysisType = static_cast<int> (analysisTypeParam->load());
+        if (analysisType == 2)
+        {
+            const float levelScale    = juce::Decibels::decibelsToGain (-12.0f);
+            const float phaseIncrement = 2.0f * juce::MathConstants<float>::pi
+                                         * kThdFundamental
+                                         / static_cast<float> (currentSampleRate);
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float sample = std::sin (thdSinePhase) * levelScale;
+                hostedInputBuffer.setSample (0, i, sample);
+                hostedInputBuffer.setSample (1, i, sample);
+                thdSinePhase += phaseIncrement;
+                if (thdSinePhase > juce::MathConstants<float>::twoPi)
+                    thdSinePhase -= juce::MathConstants<float>::twoPi;
+            }
+
+            // Capture the 1 kHz sine as the dry reference
+            captureDrySamples (numSamples);
+
+            // Route through hosted plugin and capture wet output
+            if (pluginReady.load() && hostedPlugin != nullptr)
+            {
+                hostedOutputBuffer.clear();
+                juce::MidiBuffer emptyMidi;
+                try
+                {
+                    hostedPlugin->processBlock (hostedOutputBuffer, emptyMidi);
+                }
+                catch (...)
+                {
+                    pluginReady.store (false);
+                }
+                if (pluginReady.load())
+                    captureOutputSamples (numSamples);
+            }
+
+            buffer.clear();   // Output silence to DAW
+            return;           // Skip normal test signal switch
+        }
     }
 
     // -----------------------------------------------------------------------

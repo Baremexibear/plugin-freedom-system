@@ -76,6 +76,12 @@ public:
     std::vector<std::pair<float,float>> getFreqResponse() const;
 
     //==========================================================================
+    // Phase 3.4: THD result accessors (thread-safe, protected by resultMutex)
+    // Returns (harmonic_number 1..8, amplitude_db) pairs.
+    std::vector<std::pair<int,float>> getThdHarmonics() const;
+    float getThdPercent() const;
+
+    //==========================================================================
     // Phase 3.1: Plugin Hosting Engine — public atomic state
 
     // Lifetime sentinel: shared_ptr shared with all callAsync lambdas.
@@ -197,6 +203,23 @@ private:
     // Background analysis thread
     std::unique_ptr<juce::Thread> analysisThread;
     std::atomic<bool> analysisThreadShouldRun { false };
+
+    //==========================================================================
+    // Phase 3.4: THD Harmonic Distortion Measurement
+
+    // Flat-top window for THD (amplitude accuracy over frequency resolution)
+    juce::dsp::WindowingFunction<float> windowFlatTop {
+        static_cast<size_t> (kFftSize),
+        juce::dsp::WindowingFunction<float>::flatTop
+    };
+
+    // Internal 1 kHz sine generator for THD injection (independent of test_signal param)
+    float thdSinePhase { 0.0f };
+    static constexpr float kThdFundamental = 1000.0f;   // Hz
+
+    // THD results (protected by resultMutex, same lock as freqResponseResult)
+    std::vector<std::pair<int,float>> thdHarmonics;   // (harmonic_number 1..8, amplitude_db)
+    float thdPercent { 0.0f };
 
     // FrequencyAnalysisThread accesses private members directly
     friend class FrequencyAnalysisThread;

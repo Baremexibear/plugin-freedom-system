@@ -351,6 +351,126 @@ private:
 };
 
 //==============================================================================
+// Phase 3.3: FrequencyAnalysisThread
+//
+// Background thread that reads accumulated samples from the wet and dry capture
+// FIFOs, computes complex FFTs of both, divides wet by dry to get the transfer
+// function H(f), extracts magnitude in dB per bin, and applies a 32-frame
+// exponential moving average.  The result is stored in freqResponseResult,
+// protected by resultMutex for safe UI reads.
+//
+// Thread safety model:
+//   - captureFifo / dryCaptureFifo: juce::AbstractFifo (single producer on
+//     audio thread, single consumer here) — no additional locking needed.
+//   - fftDryBuf / fftWetBuf / freqResponseAccum: accessed ONLY here — no lock.
+//   - freqResponseResult: protected by resultMutex (CriticalSection).
+//   - currentSampleRate: benign scalar data race (double, written in prepareToPlay
+//     on message thread, read here on analysis thread).  Acceptable for a scalar
+//     that only changes on stream restart.
+//==============================================================================
+
+class FrequencyAnalysisThread : public juce::Thread
+{
+public:
+    explicit FrequencyAnalysisThread (PluginScopeAudioProcessor& owner)
+        : juce::Thread ("FFTAnalysis"), proc (owner) {}
+
+    void run() override
+    {
+        while (! threadShouldExit())
+        {
+            // Guard against analysisModeParam being null before prepareToPlay() is called
+            if (proc.analysisModeParam == nullptr)
+            {
+                juce::Thread::sleep (20);
+                continue;
+            }
+
+            // Snapshot mode — freeze result, don't analyse new data
+            const int analysisMode = static_cast<int> (proc.analysisModeParam->load());
+            if (analysisMode == 1)
+            {
+                juce::Thread::sleep (50);
+                continue;
+            }
+
+            // Wait until both FIFOs contain at least one full FFT frame
+            const int needed = proc.kFftSize;
+            if (proc.captureFifo.getNumReady() / 2 < needed ||
+                proc.dryCaptureFifo.getNumReady() / 2 < needed)
+            {
+                juce::Thread::sleep (10);
+                continue;
+            }
+
+            // Read kFftSize mono samples (left channel) from each FIFO
+            proc.readFifoIntoBuffer (proc.captureFifo,    proc.captureBuffer,
+                                     proc.fftWetBuf.data(), needed);
+            proc.readFifoIntoBuffer (proc.dryCaptureFifo, proc.dryCaptureBuffer,
+                                     proc.fftDryBuf.data(), needed);
+
+            // Apply Hann window to reduce spectral leakage
+            proc.window.multiplyWithWindowingTable (proc.fftWetBuf.data(), (size_t) proc.kFftSize);
+            proc.window.multiplyWithWindowingTable (proc.fftDryBuf.data(), (size_t) proc.kFftSize);
+
+            // Forward real FFT — output is interleaved Re/Im pairs (bin 0 … N/2)
+            proc.fft.performRealOnlyForwardTransform (proc.fftWetBuf.data(), true);
+            proc.fft.performRealOnlyForwardTransform (proc.fftDryBuf.data(), true);
+
+            // Compute transfer function H(f) = Wet / Dry per bin, extract |H| in dB
+            const float sampleRate = static_cast<float> (proc.currentSampleRate);
+            std::vector<std::pair<float,float>> frame (proc.kFreqBins);
+
+            for (int bin = 0; bin < proc.kFreqBins; ++bin)
+            {
+                const float binHz = static_cast<float> (bin) * sampleRate
+                                    / static_cast<float> (proc.kFftSize);
+
+                const float wetRe = proc.fftWetBuf[bin * 2];
+                const float wetIm = proc.fftWetBuf[bin * 2 + 1];
+                const float dryRe = proc.fftDryBuf[bin * 2];
+                const float dryIm = proc.fftDryBuf[bin * 2 + 1];
+
+                // H(f) = Wet / Dry (complex division)
+                const float dryMagSq = dryRe * dryRe + dryIm * dryIm + 1e-20f;
+                const float hRe = (wetRe * dryRe + wetIm * dryIm) / dryMagSq;
+                const float hIm = (wetIm * dryRe - wetRe * dryIm) / dryMagSq;
+                const float hMag = std::sqrt (hRe * hRe + hIm * hIm);
+
+                frame[bin] = { binHz, 20.0f * std::log10 (hMag + 1e-10f) };
+            }
+
+            // 32-frame exponential moving average
+            proc.freqResponseFrameCount++;
+            if (proc.freqResponseFrameCount == 1 ||
+                (int) proc.freqResponseAccum.size() != proc.kFreqBins)
+            {
+                proc.freqResponseAccum = frame;
+            }
+            else
+            {
+                const float alpha = 1.0f / static_cast<float> (
+                    juce::jmin (proc.freqResponseFrameCount, 32));
+                for (int bin = 0; bin < proc.kFreqBins; ++bin)
+                    proc.freqResponseAccum[bin].second +=
+                        alpha * (frame[bin].second - proc.freqResponseAccum[bin].second);
+            }
+
+            // Publish result (lock protected — read by UI thread via getFreqResponse())
+            {
+                const juce::ScopedLock lock (proc.resultMutex);
+                proc.freqResponseResult = proc.freqResponseAccum;
+            }
+
+            juce::Thread::sleep (5);   // ~200 Hz max analysis rate; UI will throttle further
+        }
+    }
+
+private:
+    PluginScopeAudioProcessor& proc;
+};
+
+//==============================================================================
 juce::AudioProcessorValueTreeState::ParameterLayout PluginScopeAudioProcessor::createParameterLayout()
 {
     // All 5 parameters are AudioParameterChoice (snake_case IDs — IMMUTABLE CONTRACT)
@@ -442,6 +562,17 @@ PluginScopeAudioProcessor::PluginScopeAudioProcessor()
     // Scanning is triggered only when the user explicitly clicks "Scan Plugins"
     // in the editor. The cache is loaded above so previously found plugins are
     // available immediately without scanning.
+
+    // Phase 3.3: Pre-allocate FFT work buffers and result vectors
+    fftDryBuf.resize ((size_t) kFftSize * 2, 0.0f);
+    fftWetBuf.resize ((size_t) kFftSize * 2, 0.0f);
+    freqResponseResult.resize ((size_t) kFreqBins, { 0.0f, 0.0f });
+    freqResponseAccum .resize ((size_t) kFreqBins, { 0.0f, 0.0f });
+
+    // Start background FFT analysis thread (low priority — never blocks audio)
+    analysisThreadShouldRun.store (true);
+    analysisThread = std::make_unique<FrequencyAnalysisThread> (*this);
+    analysisThread->startThread (juce::Thread::Priority::low);
 }
 
 PluginScopeAudioProcessor::~PluginScopeAudioProcessor()
@@ -452,6 +583,11 @@ PluginScopeAudioProcessor::~PluginScopeAudioProcessor()
 
     // Signal audio thread to stop using hosted plugin BEFORE we destroy it
     pluginReady.store (false);
+
+    // Phase 3.3: Stop analysis thread BEFORE destroying buffers it may be reading
+    analysisThreadShouldRun.store (false);
+    if (analysisThread != nullptr)
+        analysisThread->stopThread (3000);
 
     // Stop scanner thread cleanly (wait up to 3 seconds)
     if (scanThread != nullptr)
@@ -482,10 +618,15 @@ void PluginScopeAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     if (hostedPlugin != nullptr && pluginReady.load())
         hostedPlugin->prepareToPlay (sampleRate, samplesPerBlock);
 
-    // Phase 3.2: Resize and reset the lock-free capture buffer
+    // Phase 3.2: Resize and reset the lock-free wet capture buffer
     captureBuffer.setSize (2, kCaptureFifoSize);
     captureBuffer.clear();
     captureFifo.reset();
+
+    // Phase 3.3: Resize and reset the lock-free dry reference capture buffer
+    dryCaptureBuffer.setSize (2, kCaptureFifoSize);
+    dryCaptureBuffer.clear();
+    dryCaptureFifo.reset();
 
     // Reset sweep state on sample rate change
     sweepPhase    = 0.0f;
@@ -497,7 +638,8 @@ void PluginScopeAudioProcessor::releaseResources()
     // Release scratch buffers to save memory when plugin is not in use
     hostedInputBuffer .setSize (0, 0);
     hostedOutputBuffer.setSize (0, 0);
-    captureBuffer.setSize (0, 0);
+    captureBuffer   .setSize (0, 0);
+    dryCaptureBuffer.setSize (0, 0);
 }
 
 //==============================================================================
@@ -541,6 +683,74 @@ void PluginScopeAudioProcessor::captureOutputSamples (int numSamples)
 }
 
 //==============================================================================
+// Phase 3.3: Helper — write hostedInputBuffer samples into the dry reference
+// capture FIFO.  Mirrors captureOutputSamples() but reads from hostedInputBuffer.
+// Called from processBlock() on the audio thread; must be lock-free.
+
+void PluginScopeAudioProcessor::captureDrySamples (int numSamples)
+{
+    const int numToWrite = juce::jmin (numSamples,
+                                       dryCaptureFifo.getFreeSpace() / 2);
+    if (numToWrite <= 0)
+        return;
+
+    int start1, size1, start2, size2;
+    dryCaptureFifo.prepareToWrite (numToWrite * 2, start1, size1, start2, size2);
+
+    // Write region 1 — interleave L/R into sequential FIFO indices
+    for (int i = 0; i < size1 / 2; ++i)
+    {
+        dryCaptureBuffer.setSample (0, start1 + i * 2,     hostedInputBuffer.getSample (0, i));
+        dryCaptureBuffer.setSample (0, start1 + i * 2 + 1, hostedInputBuffer.getSample (1, i));
+    }
+
+    // Write region 2 (wrap-around)
+    const int offset = size1 / 2;
+    for (int i = 0; i < size2 / 2; ++i)
+    {
+        dryCaptureBuffer.setSample (0, start2 + i * 2,     hostedInputBuffer.getSample (0, offset + i));
+        dryCaptureBuffer.setSample (0, start2 + i * 2 + 1, hostedInputBuffer.getSample (1, offset + i));
+    }
+
+    dryCaptureFifo.finishedWrite (numToWrite * 2);
+}
+
+//==============================================================================
+// Phase 3.3: Helper — read numSamples mono samples from a FIFO into a float
+// buffer for FFT processing.  The FIFO stores interleaved stereo (L, R, L, R …)
+// so we consume numSamples * 2 FIFO slots and extract every other slot (L only).
+// Called from the analysis thread (single consumer); juce::AbstractFifo is safe.
+
+void PluginScopeAudioProcessor::readFifoIntoBuffer (juce::AbstractFifo& fifo,
+                                                     juce::AudioBuffer<float>& srcBuf,
+                                                     float* dest,
+                                                     int numSamples)
+{
+    const int numSlots = numSamples * 2;   // interleaved stereo slots
+    int start1, size1, start2, size2;
+    fifo.prepareToRead (numSlots, start1, size1, start2, size2);
+
+    // Extract left channel samples (even indices within each region)
+    int destIdx = 0;
+    for (int i = 0; i < size1; i += 2)
+        dest[destIdx++] = srcBuf.getSample (0, start1 + i);
+    for (int i = 0; i < size2; i += 2)
+        dest[destIdx++] = srcBuf.getSample (0, start2 + i);
+
+    fifo.finishedRead (numSlots);
+}
+
+//==============================================================================
+// Phase 3.3: Public accessor — returns a copy of the latest frequency response
+// result vector, protected by resultMutex so the UI thread can call safely.
+
+std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getFreqResponse() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return freqResponseResult;
+}
+
+//==============================================================================
 void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                                                juce::MidiBuffer& midiMessages)
 {
@@ -576,6 +786,9 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             // Copy DAW input into hosted plugin's pre-allocated input buffer
             for (int ch = 0; ch < numChannels; ++ch)
                 hostedInputBuffer.copyFrom (ch, 0, buffer, ch, 0, numSamples);
+
+            // Phase 3.3: Capture DAW input as the dry (pre-plugin) reference
+            captureDrySamples (numSamples);
 
             // Clear hosted output buffer before processing
             hostedOutputBuffer.clear();
@@ -697,6 +910,9 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     // --- Route test signal through hosted plugin (if ready) and capture output ---
     if (pluginReady.load() && hostedPlugin != nullptr)
     {
+        // Phase 3.3: Capture generated test signal as the dry (pre-plugin) reference
+        captureDrySamples (numSamples);
+
         hostedOutputBuffer.clear();
 
         juce::MidiBuffer emptyMidi;

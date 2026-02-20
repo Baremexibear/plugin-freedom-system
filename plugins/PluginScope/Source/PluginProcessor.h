@@ -2,6 +2,9 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
 
+// Forward declaration for friend
+class FrequencyAnalysisThread;
+
 class PluginScopeAudioProcessor : public juce::AudioProcessor
 {
 public:
@@ -66,6 +69,11 @@ public:
     // Phase 3.2: Capture buffer accessors (read by analysis thread in Phases 3.3+)
     juce::AbstractFifo&       getCaptureFifo()   { return captureFifo; }
     juce::AudioBuffer<float>& getCaptureBuffer() { return captureBuffer; }
+
+    //==========================================================================
+    // Phase 3.3: Thread-safe frequency response result read by UI (Phase 4)
+    // Returns (frequency_hz, magnitude_db) pairs for kFreqBins bins.
+    std::vector<std::pair<float,float>> getFreqResponse() const;
 
     //==========================================================================
     // Phase 3.1: Plugin Hosting Engine — public atomic state
@@ -150,6 +158,48 @@ private:
     static constexpr int kCaptureFifoSize = 192000 * 2;   // samples (interleaved stereo)
     juce::AbstractFifo       captureFifo   { kCaptureFifoSize };
     juce::AudioBuffer<float> captureBuffer;   // Sized in prepareToPlay
+
+    //==========================================================================
+    // Phase 3.3: Dry reference capture (parallel to captureBuffer, same FIFO size)
+    juce::AbstractFifo       dryCaptureFifo   { kCaptureFifoSize };
+    juce::AudioBuffer<float> dryCaptureBuffer;   // Sized in prepareToPlay
+
+    // Phase 3.3: Write numSamples from hostedInputBuffer into the dry capture FIFO
+    void captureDrySamples (int numSamples);
+
+    // Phase 3.3: Read numSamples mono samples (left channel) from a FIFO into a float buffer
+    void readFifoIntoBuffer (juce::AbstractFifo& fifo, juce::AudioBuffer<float>& srcBuf,
+                             float* dest, int numSamples);
+
+    //==========================================================================
+    // Phase 3.3: FFT Frequency Response Analysis Engine
+
+    static constexpr int kFftOrder  = 12;            // 2^12 = 4096 points
+    static constexpr int kFftSize   = 1 << kFftOrder; // 4096
+    static constexpr int kFreqBins  = kFftSize / 2;   // 2048 output bins
+
+    juce::dsp::FFT                      fft    { kFftOrder };
+    juce::dsp::WindowingFunction<float> window {
+        static_cast<size_t> (kFftSize),
+        juce::dsp::WindowingFunction<float>::hann
+    };
+
+    // Complex FFT work buffers — accessed ONLY by the analysis thread, no locking needed
+    std::vector<float> fftDryBuf;   // kFftSize * 2 floats (interleaved Re/Im)
+    std::vector<float> fftWetBuf;   // kFftSize * 2 floats (interleaved Re/Im)
+
+    // Frequency response result — protected by resultMutex
+    std::vector<std::pair<float,float>> freqResponseResult;   // (freq_hz, mag_db) per bin
+    std::vector<std::pair<float,float>> freqResponseAccum;    // Running average accumulator
+    int freqResponseFrameCount { 0 };
+    mutable juce::CriticalSection resultMutex;
+
+    // Background analysis thread
+    std::unique_ptr<juce::Thread> analysisThread;
+    std::atomic<bool> analysisThreadShouldRun { false };
+
+    // FrequencyAnalysisThread accesses private members directly
+    friend class FrequencyAnalysisThread;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginScopeAudioProcessor)
 };

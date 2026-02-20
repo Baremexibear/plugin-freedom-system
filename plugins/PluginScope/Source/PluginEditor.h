@@ -73,7 +73,8 @@ private:
     juce::Array<juce::PluginDescription> knownDescs;
 
     // Buttons
-    juce::TextButton loadButton   { "Load Selected" };
+    juce::TextButton scanButton   { "Scan Plugins"   };
+    juce::TextButton loadButton   { "Load Selected"  };
     juce::TextButton unloadButton { "Unload Plugin"  };
 
     // Status label (scan progress, load errors)

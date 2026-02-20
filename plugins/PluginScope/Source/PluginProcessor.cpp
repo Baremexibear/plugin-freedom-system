@@ -219,17 +219,30 @@ PluginScopeAudioProcessor::PluginScopeAudioProcessor()
     // JUCE 8: addDefaultFormats() is deleted — use free function instead
     juce::addDefaultFormatsToManager (formatManager);
 
-    // Load persisted scan cache if it exists (avoids full rescan on every launch)
+    // Load persisted scan cache if it exists (avoids full rescan on every launch).
+    // Mark scanComplete=true immediately so the UI can display cached results.
     auto cacheFile = getScanCacheFile();
     if (cacheFile.existsAsFile())
     {
         auto xml = juce::parseXML (cacheFile);
         if (xml != nullptr)
+        {
             knownPluginList.recreateFromXml (*xml);
+            scanComplete.store (true);
+        }
     }
 
-    // Start background scan to pick up any new/changed plugins since last cache
-    startPluginScan();
+    // NOTE: No auto-scan on startup.
+    //
+    // In-process plugin scanning loads VST3/AU binaries on a background thread.
+    // This is inherently unsafe when the host has already loaded other plugins —
+    // those plugins' message-thread initialization can race with the scanner's
+    // in-process DLL loads, corrupting shared JUCE internals and causing crashes
+    // in completely unrelated plugins (e.g. ScalerAudio2).
+    //
+    // Scanning is triggered only when the user explicitly clicks "Scan Plugins"
+    // in the editor. The cache is loaded above so previously found plugins are
+    // available immediately without scanning.
 }
 
 PluginScopeAudioProcessor::~PluginScopeAudioProcessor()

@@ -22,7 +22,21 @@ PluginScopeAudioProcessorEditor::PluginScopeAudioProcessorEditor (PluginScopeAud
     addAndMakeVisible (pluginListBox);
 
     //--------------------------------------------------------------------------
-    // Load / Unload buttons
+    // Scan / Load / Unload buttons
+
+    // Scan button: triggers manual plugin scan.
+    // Scanning is NOT automatic on startup because loading plugins in-process
+    // on a background thread races with other plugins' initialization and
+    // causes crashes in the host. Scan when the project is fully loaded.
+    scanButton.onClick = [this]
+    {
+        processorRef.scanComplete.store (false);
+        statusLabel.setText ("Scanning...", juce::dontSendNotification);
+        processorRef.startPluginScan();
+    };
+    scanButton.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xff1e4a1e));
+    scanButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
+    addAndMakeVisible (scanButton);
 
     loadButton.onClick = [this] { loadSelectedPlugin(); };
     loadButton.setColour (juce::TextButton::buttonColourId,   juce::Colour (0xff1e3a6e));
@@ -42,7 +56,8 @@ PluginScopeAudioProcessorEditor::PluginScopeAudioProcessorEditor (PluginScopeAud
     //--------------------------------------------------------------------------
     // Status label
 
-    statusLabel.setText ("Scanning for plugins...", juce::dontSendNotification);
+    statusLabel.setText ("Click 'Scan Plugins' to discover installed plugins",
+                         juce::dontSendNotification);
     statusLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
     statusLabel.setFont (juce::FontOptions (12.0f));
     statusLabel.setJustificationType (juce::Justification::centredLeft);
@@ -97,9 +112,10 @@ void PluginScopeAudioProcessorEditor::resized()
     // Status label at the top
     statusLabel.setBounds (leftPanel.removeFromTop (28).reduced (4, 4));
 
-    // Buttons at the bottom
+    // Buttons at the bottom (bottom-up order)
     unloadButton.setBounds (leftPanel.removeFromBottom (36).reduced (4, 4));
     loadButton  .setBounds (leftPanel.removeFromBottom (36).reduced (4, 4));
+    scanButton  .setBounds (leftPanel.removeFromBottom (36).reduced (4, 4));
 
     // Plugin list fills remaining left panel area
     pluginListBox.setBounds (leftPanel.reduced (4, 4));
@@ -147,8 +163,12 @@ void PluginScopeAudioProcessorEditor::updatePluginList()
         knownDescs.add (desc);
     }
 
-    statusLabel.setText (juce::String (plugins.size()) + " plugins found",
-                         juce::dontSendNotification);
+    if (plugins.isEmpty())
+        statusLabel.setText ("No plugins found — click 'Scan Plugins'",
+                             juce::dontSendNotification);
+    else
+        statusLabel.setText (juce::String (plugins.size()) + " plugins found",
+                             juce::dontSendNotification);
 
     pluginListBox.updateContent();
     pluginListBox.repaint();

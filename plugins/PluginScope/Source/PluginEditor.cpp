@@ -117,7 +117,26 @@ void PluginScopeAudioProcessorEditor::resized()
 //==============================================================================
 void PluginScopeAudioProcessorEditor::updatePluginList()
 {
-    // Must be called on the message thread (ScanListener ensures this)
+    // Must be called on the message thread (ScanListener ensures this).
+    //
+    // THREADING: KnownPluginList is NOT thread-safe. The scan thread writes to
+    // it via PluginDirectoryScanner::scanNextFile() while intermediate callAsync
+    // messages arrive here. Reading getTypes() concurrently with scanNextFile()
+    // is a data race that causes crashes.
+    //
+    // FIX: During scanning, only update the progress label — never read the list.
+    // Once scanComplete is true, the scan thread has stopped writing and all
+    // writes are visible (seq_cst store/load fence), so getTypes() is safe.
+
+    if (!processorRef.scanComplete.load())
+    {
+        // Scan in progress — just show progress count, do NOT read the list
+        statusLabel.setText ("Scanning... " + juce::String (processorRef.scanScannedCount.load()) + " found",
+                             juce::dontSendNotification);
+        return;
+    }
+
+    // Scan complete — safe to read the full list exactly once
     pluginListItems.clear();
     knownDescs.clear();
 
@@ -128,16 +147,8 @@ void PluginScopeAudioProcessorEditor::updatePluginList()
         knownDescs.add (desc);
     }
 
-    if (processorRef.scanComplete.load())
-    {
-        statusLabel.setText (juce::String (plugins.size()) + " plugins found",
-                             juce::dontSendNotification);
-    }
-    else
-    {
-        statusLabel.setText ("Scanning... " + juce::String (plugins.size()) + " found",
-                             juce::dontSendNotification);
-    }
+    statusLabel.setText (juce::String (plugins.size()) + " plugins found",
+                         juce::dontSendNotification);
 
     pluginListBox.updateContent();
     pluginListBox.repaint();

@@ -70,4 +70,9 @@ target_compile_definitions(PluginScope
         JUCE_VST3_CAN_REPLACE_VST2=0
         JUCE_WEB_BROWSER=1    # Required for WebBrowserComponent
         JUCE_USE_CURL=0       # Avoid libcurl dependency
+        # Plugin hosting: enable format support so addDefaultFormatsToManager
+        # actually registers VST3PluginFormat and AudioUnitPluginFormat.
+        # Without these, JUCE_INTERNAL_HAS_VST3/AU remain 0 and no formats load.
+        JUCE_PLUGINHOST_VST3=1
+        JUCE_PLUGINHOST_AU=1
 )

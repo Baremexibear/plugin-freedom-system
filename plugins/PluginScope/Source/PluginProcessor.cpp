@@ -25,25 +25,23 @@ public:
 
         // SELF-EXCLUSION (per-format):
         //
-        // The dead man's pedal file holds ONE path; PluginDirectoryScanner reads it
-        // in its constructor and skips that path. We must write the bundle extension
-        // that MATCHES the format being scanned:
-        //   - VST3 scanner  → skip PluginScope.vst3
-        //   - AU  scanner   → skip PluginScope.component
+        // PluginDirectoryScanner reads the dead man's pedal ONCE in its constructor
+        // and adds that single path to its internal skip list. We must write the path
+        // of OUR bundle for the format being scanned before the scanner is created.
         //
-        // If PluginScope is running as VST3 and we only wrote the .vst3 path, the AU
-        // scanner would still find and load PluginScope.component, triggering a
-        // recursive instantiation crash. Writing the format-appropriate path before
-        // each scanner construction prevents this.
+        // Critical bug if this is wrong: if PluginScope runs as VST3 but the pedal
+        // only has the .vst3 path, the AU scanner finds PluginScope.component in the
+        // Components folder (a DIFFERENT directory), loads it, and triggers a recursive
+        // scan → crash.
         //
-        // selfBundle = the bundle we are currently executing from.
-        // bundleParent / bundleStem let us derive sibling bundles of other formats.
+        // Correct approach: build the search paths FIRST, then search them for our own
+        // bundle (bundleStem + format-specific extension). That gives us the real
+        // installed path in the right directory, regardless of which format we run as.
         auto selfExe    = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
         auto selfBundle = selfExe.getParentDirectory()   // MacOS/
                                  .getParentDirectory()   // Contents/
                                  .getParentDirectory();  // PluginScope.{vst3,component}
-        auto bundleParent = selfBundle.getParentDirectory();
-        auto bundleStem   = selfBundle.getFileNameWithoutExtension(); // "PluginScope"
+        auto bundleStem = selfBundle.getFileNameWithoutExtension(); // "PluginScope"
 
         // Iterate over every registered format (VST3 + AU on macOS)
         for (int formatIdx = 0; formatIdx < ownerProcessor.formatManager.getNumFormats(); ++formatIdx)
@@ -53,24 +51,8 @@ public:
 
             auto* format = ownerProcessor.formatManager.getFormat (formatIdx);
 
-            // Write the self-bundle for THIS format to the dead man's pedal BEFORE
-            // creating the scanner — the scanner reads the pedal in its constructor.
-            {
-                juce::String selfExt;
-                if (format->getName().containsIgnoreCase ("VST3"))
-                    selfExt = ".vst3";
-                else if (format->getName().containsIgnoreCase ("AU") ||
-                         format->getName().containsIgnoreCase ("AudioUnit"))
-                    selfExt = ".component";
-
-                auto targetBundle = bundleParent.getChildFile (bundleStem + selfExt);
-                if (targetBundle.exists())
-                    pedalFile.replaceWithText (targetBundle.getFullPathName());
-                else if (selfBundle.exists())
-                    pedalFile.replaceWithText (selfBundle.getFullPathName()); // fallback
-            }
-
-            // Build search paths per format
+            // Build search paths for this format FIRST — we need them to locate our
+            // own bundle in the right directory before we can write the pedal.
             juce::FileSearchPath paths;
 
             if (format->getName().containsIgnoreCase ("VST3"))
@@ -85,8 +67,36 @@ public:
                 paths = format->getDefaultLocationsToSearch();
             }
 
-            // Scanner reads pedal file in constructor — the format-specific self-bundle
-            // is now in the pedal, so the scanner skips it automatically.
+            // Now write the self-bundle path to the dead man's pedal.
+            // Search each of this format's directories for bundleStem + extension.
+            // The scanner reads the pedal in its constructor, so this must happen first.
+            {
+                juce::String selfExt;
+                if (format->getName().containsIgnoreCase ("VST3"))
+                    selfExt = ".vst3";
+                else if (format->getName().containsIgnoreCase ("AU") ||
+                         format->getName().containsIgnoreCase ("AudioUnit"))
+                    selfExt = ".component";
+
+                juce::File foundSelf;
+                for (int i = 0; i < paths.getNumPaths(); ++i)
+                {
+                    auto candidate = paths[i].getChildFile (bundleStem + selfExt);
+                    if (candidate.exists())
+                    {
+                        foundSelf = candidate;
+                        break;
+                    }
+                }
+
+                // Write found path (or fall back to current bundle if not found)
+                pedalFile.replaceWithText (foundSelf.exists()
+                                               ? foundSelf.getFullPathName()
+                                               : selfBundle.getFullPathName());
+            }
+
+            // Scanner reads pedal file in constructor — our bundle for this format is
+            // now in the pedal, so the scanner will skip it automatically.
             juce::PluginDirectoryScanner scanner (
                 ownerProcessor.knownPluginList,
                 *format,

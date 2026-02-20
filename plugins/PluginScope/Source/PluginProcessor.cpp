@@ -400,6 +400,10 @@ public:
             {
                 computeFrequencyResponse();
             }
+            else if (analysisType == 1)   // Dynamics Curve (Phase 3.6)
+            {
+                computeDynamicsSweep();
+            }
             else if (analysisType == 2)   // Harmonic Distortion (Phase 3.4)
             {
                 computeThdMeasurement();
@@ -698,6 +702,158 @@ private:
         }
         return unwrapped;
     }
+
+    //==========================================================================
+    // Phase 3.6: Dynamics Analysis Engine helpers
+    //
+    // These methods run entirely on the analysis background thread.
+    // The audio thread is the single producer for captureFifo (juce::AbstractFifo
+    // is designed for single-producer + single-consumer, so no additional locking
+    // is required for FIFO access on this thread).
+
+    // Flush all available samples from the wet capture FIFO (discard stale output).
+    void flushCaptureFifo()
+    {
+        const int available = proc.captureFifo.getNumReady();
+        if (available <= 0) return;
+        int s1, sz1, s2, sz2;
+        proc.captureFifo.prepareToRead (available, s1, sz1, s2, sz2);
+        proc.captureFifo.finishedRead (sz1 + sz2);
+    }
+
+    // Block until the wet capture FIFO contains at least numSamples×2 slots
+    // (×2 because the FIFO stores interleaved L+R pairs).
+    // Returns immediately if threadShouldExit() becomes true.
+    void waitForFifoSamples (int numSamples)
+    {
+        const int needed = numSamples * 2;
+        while (! threadShouldExit())
+        {
+            if (proc.captureFifo.getNumReady() >= needed)
+                return;
+            juce::Thread::sleep (5);
+        }
+    }
+
+    // Read numSamples×2 slots from the wet capture FIFO and return the RMS
+    // amplitude of the left channel samples.  The FIFO stores interleaved
+    // L/R pairs (even indices = L, odd indices = R), so we step by 2.
+    float measureRmsFromFifo (int numSamples)
+    {
+        const int numSlots = numSamples * 2;
+        int s1, sz1, s2, sz2;
+        proc.captureFifo.prepareToRead (numSlots, s1, sz1, s2, sz2);
+
+        float sumSq = 0.0f;
+        int count   = 0;
+
+        // Region 1 — left channel samples are at even offsets within the region
+        for (int i = 0; i < sz1; i += 2)
+        {
+            const float s = proc.captureBuffer.getSample (0, s1 + i);
+            sumSq += s * s;
+            ++count;
+        }
+        // Region 2 (wrap-around)
+        for (int i = 0; i < sz2; i += 2)
+        {
+            const float s = proc.captureBuffer.getSample (0, s2 + i);
+            sumSq += s * s;
+            ++count;
+        }
+
+        proc.captureFifo.finishedRead (sz1 + sz2);
+
+        return (count > 0) ? std::sqrt (sumSq / (float) count) : 0.0f;
+    }
+
+    //--------------------------------------------------------------------------
+    // Phase 3.6: Full dynamics sweep — runs synchronously on analysis thread.
+    //
+    // Injects a 1 kHz sine at stepped levels (-60 to 0 dBFS, 1 dB per step).
+    // For each step:
+    //   1. Set dynamicsSineLevel  → audio thread picks it up next processBlock.
+    //   2. Flush stale FIFO samples from the previous level.
+    //   3. Wait for settling period (100 ms worth of samples) → flush again.
+    //   4. Wait for measurement period (100 ms) → read RMS.
+    // Results stored as (input_dbfs, output_dbfs) pairs and published under
+    // resultMutex so the UI thread can call getDynamicsResult() safely.
+
+    void computeDynamicsSweep()
+    {
+        // Re-trigger guard: bail out if a sweep is already in progress.
+        if (proc.dynamicsSweepRunning.load())
+        {
+            juce::Thread::sleep (50);
+            return;
+        }
+
+        proc.dynamicsSweepRunning.store (true);
+        proc.dynamicsSweepProgress.store (0);
+
+        const float sampleRate       = (float) proc.currentSampleRate;
+        const int   settlingMs       = 100;
+        const int   measurementMs    = 100;
+        const int   settlingSamples  = (int) (sampleRate * settlingMs    / 1000.0f);
+        const int   measureSamples   = (int) (sampleRate * measurementMs / 1000.0f);
+
+        constexpr float kStartDb = -60.0f;
+        constexpr float kEndDb   =   0.0f;
+        constexpr float kStepDb  =   1.0f;
+        const int numSteps = (int) ((kEndDb - kStartDb) / kStepDb) + 1;   // 61 steps
+
+        std::vector<std::pair<float,float>> results;
+        results.reserve (numSteps);
+
+        for (int step = 0; step < numSteps && ! threadShouldExit(); ++step)
+        {
+            // Abort if the user switched to a different analysis type mid-sweep.
+            if ((int) proc.analysisTypeParam->load() != 1)
+                break;
+
+            const float inputDb     = kStartDb + (float) step * kStepDb;
+            const float inputLinear = juce::Decibels::decibelsToGain (inputDb);
+
+            // Set level — audio thread reads this atomically on next processBlock.
+            proc.dynamicsSineLevel.store (inputLinear);
+
+            // Flush stale FIFO samples accumulated at the previous level.
+            flushCaptureFifo();
+
+            // Wait for the hosted plugin to settle at the new level, then discard.
+            waitForFifoSamples (settlingSamples);
+            flushCaptureFifo();
+
+            // Safety check before measuring.
+            if (threadShouldExit() || (int) proc.analysisTypeParam->load() != 1)
+                break;
+
+            // Accumulate measurement window and compute RMS output level.
+            waitForFifoSamples (measureSamples);
+            const float outputRmsLinear = measureRmsFromFifo (measureSamples);
+            const float outputDb        = juce::Decibels::gainToDecibels (outputRmsLinear + 1e-10f);
+
+            results.push_back ({ inputDb, outputDb });
+
+            // Update progress for UI display (0-100).
+            proc.dynamicsSweepProgress.store ((int) (100.0f * (float) (step + 1)
+                                                               / (float) numSteps));
+        }
+
+        // Publish results under the shared result lock.
+        {
+            const juce::ScopedLock lock (proc.resultMutex);
+            proc.dynamicsResult = results;
+        }
+
+        // Silence the dynamics sine now that the sweep is complete.
+        proc.dynamicsSineLevel.store (0.0f);
+        proc.dynamicsSweepRunning.store (false);
+        proc.dynamicsSweepProgress.store (100);
+
+        // Brief pause before allowing a re-trigger to prevent accidental double-sweep.
+        juce::Thread::sleep (500);
+    }
 };
 
 //==============================================================================
@@ -806,6 +962,9 @@ PluginScopeAudioProcessor::PluginScopeAudioProcessor()
     phaseResponseResult.resize ((size_t) kFreqBins, { 0.0f, 0.0f });
     groupDelayResult   .resize ((size_t) kFreqBins, { 0.0f, 0.0f });
 
+    // Phase 3.6: Reserve dynamics result storage (at most 61 steps: -60dBFS to 0dBFS)
+    dynamicsResult.reserve (64);
+
     // Start background FFT analysis thread (low priority — never blocks audio)
     analysisThreadShouldRun.store (true);
     analysisThread = std::make_unique<FrequencyAnalysisThread> (*this);
@@ -871,6 +1030,9 @@ void PluginScopeAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
 
     // Phase 3.4: Reset THD sine generator phase
     thdSinePhase = 0.0f;
+
+    // Phase 3.6: Reset dynamics sine phase accumulator
+    dynamicsSinePhaseAccum = 0.0f;
 }
 
 void PluginScopeAudioProcessor::releaseResources()
@@ -1023,6 +1185,16 @@ std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getGroupDelay() c
 }
 
 //==============================================================================
+// Phase 3.6: Dynamics result accessor — thread-safe copy of the gain transfer
+// function data.  Protected by the shared resultMutex.
+
+std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getDynamicsResult() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return dynamicsResult;
+}
+
+//==============================================================================
 void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                                                juce::MidiBuffer& midiMessages)
 {
@@ -1087,6 +1259,52 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         }
         // If no hosted plugin in Live Audio mode: pass through unchanged
         return;
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3.6: Dynamics Curve override — when analysis_type == 1, inject a
+    // controlled 1 kHz sine at the level set by the analysis thread via
+    // dynamicsSineLevel (atomic).  The analysis thread steps this level from
+    // -60 dBFS to 0 dBFS and measures the RMS output after each settling period.
+    // -----------------------------------------------------------------------
+    {
+        const int analysisType = static_cast<int> (analysisTypeParam->load());
+        if (analysisType == 1)  // Dynamics Curve — controlled sine at dynamicsSineLevel
+        {
+            const float level    = dynamicsSineLevel.load();
+            const float phaseInc = 2.0f * juce::MathConstants<float>::pi
+                                   * 1000.0f   // 1 kHz
+                                   / static_cast<float> (currentSampleRate);
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float sample = std::sin (dynamicsSinePhaseAccum) * level;
+                hostedInputBuffer.setSample (0, i, sample);
+                hostedInputBuffer.setSample (1, i, sample);
+                dynamicsSinePhaseAccum += phaseInc;
+                if (dynamicsSinePhaseAccum > juce::MathConstants<float>::twoPi)
+                    dynamicsSinePhaseAccum -= juce::MathConstants<float>::twoPi;
+            }
+
+            if (pluginReady.load() && hostedPlugin != nullptr)
+            {
+                hostedOutputBuffer.clear();
+                juce::MidiBuffer emptyMidi;
+                try
+                {
+                    hostedPlugin->processBlock (hostedOutputBuffer, emptyMidi);
+                }
+                catch (...)
+                {
+                    pluginReady.store (false);
+                }
+                if (pluginReady.load())
+                    captureOutputSamples (numSamples);
+            }
+
+            buffer.clear();   // Output silence to DAW
+            return;           // Skip normal test signal switch
+        }
     }
 
     // -----------------------------------------------------------------------

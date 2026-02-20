@@ -88,6 +88,13 @@ public:
     std::vector<std::pair<float,float>> getGroupDelay() const;
 
     //==========================================================================
+    // Phase 3.6: Dynamics Analysis Engine accessors (thread-safe)
+    // Returns (input_dbfs, output_dbfs) pairs for the gain transfer function.
+    std::vector<std::pair<float,float>> getDynamicsResult() const;
+    int  getDynamicsSweepProgress() const { return dynamicsSweepProgress.load(); }
+    bool isDynamicsSweepRunning()   const { return dynamicsSweepRunning.load(); }
+
+    //==========================================================================
     // Phase 3.1: Plugin Hosting Engine — public atomic state
 
     // Lifetime sentinel: shared_ptr shared with all callAsync lambdas.
@@ -231,6 +238,23 @@ private:
     // Phase 3.5: Phase Response + Group Delay results (protected by resultMutex)
     std::vector<std::pair<float,float>> phaseResponseResult;  // (freq_hz, phase_degrees)
     std::vector<std::pair<float,float>> groupDelayResult;     // (freq_hz, group_delay_ms)
+
+    //==========================================================================
+    // Phase 3.6: Dynamics Analysis Engine
+
+    // Linear amplitude of 1kHz sine injected in dynamics mode.
+    // Written by analysis thread, read by audio thread — must be atomic.
+    std::atomic<float> dynamicsSineLevel { 0.0f };
+
+    // Phase accumulator for 1kHz sine — audio thread only, no atomic needed.
+    float dynamicsSinePhaseAccum { 0.0f };
+
+    // Sweep progress (0-100) and running flag — read by UI thread via accessors.
+    std::atomic<int>  dynamicsSweepProgress { 0 };
+    std::atomic<bool> dynamicsSweepRunning  { false };
+
+    // Dynamics gain transfer function result — protected by resultMutex.
+    std::vector<std::pair<float,float>> dynamicsResult;  // (input_dbfs, output_dbfs)
 
     // FrequencyAnalysisThread accesses private members directly
     friend class FrequencyAnalysisThread;

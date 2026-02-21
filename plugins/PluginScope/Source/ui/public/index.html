@@ -1438,6 +1438,28 @@
   }
 
   /* ================================================================
+     NATIVE FUNCTION CALLER — invokes C++ withNativeFunction handlers
+     Uses __juce__invoke protocol directly (no module dependency).
+     getNativeFunction(name)(args) from the ES6 module also works, but
+     this helper is available immediately without waiting for module load.
+  ================================================================ */
+  function callNative(name, data) {
+    // Method 1: module-exposed getNativeFunction (preferred when available)
+    if (typeof window.__juceGetNativeFunction === 'function') {
+      window.__juceGetNativeFunction(name)(data || {});
+      return;
+    }
+    // Method 2: direct __juce__invoke event (always available if bridge loaded)
+    if (window.__JUCE__ && window.__JUCE__.backend) {
+      window.__JUCE__.backend.emitEvent('__juce__invoke', {
+        name: name,
+        params: [data || {}],
+        resultId: -1
+      });
+    }
+  }
+
+  /* ================================================================
      PLUGIN LIST — called by C++ via evaluateJavascript()
   ================================================================ */
   var allPlugins = [];  // full list from last scan
@@ -1522,10 +1544,7 @@
     if (plugin) {
       handlePluginLoading(plugin.name);
     }
-    // withNativeFunction handlers require getNativeFunction — NOT emitEvent directly
-    if (typeof window.__juceGetNativeFunction === 'function') {
-      window.__juceGetNativeFunction('loadPluginRequested')({ pluginIndex: index });
-    }
+    callNative('loadPluginRequested', { pluginIndex: index });
   }
 
   function onScanPlugins() {
@@ -1536,10 +1555,7 @@
     btn.classList.add('scanning');
     document.getElementById('plugin-list').innerHTML =
       '<div class="plugin-list-empty">Scanning for plugins\u2026</div>';
-    // withNativeFunction handlers require getNativeFunction — NOT emitEvent directly
-    if (typeof window.__juceGetNativeFunction === 'function') {
-      window.__juceGetNativeFunction('scanPluginsRequested')({});
-    }
+    callNative('scanPluginsRequested', {});
   }
 
   /* ================================================================
@@ -1555,19 +1571,15 @@
       drawGraph(tabKeys[state.analysisType] || 'frequency', state.comparison !== 0);
     }, 800);
     // Notify C++ that analyze was triggered
-    if (typeof window.__juceGetNativeFunction === 'function') {
-      window.__juceGetNativeFunction('analyzeRequested')({
-        testSignal: state.testSignal,
-        analysisType: state.analysisType,
-        analysisMode: state.analysisMode
-      });
-    }
+    callNative('analyzeRequested', {
+      testSignal: state.testSignal,
+      analysisType: state.analysisType,
+      analysisMode: state.analysisMode
+    });
   }
 
   function onExport() {
-    if (typeof window.__juceGetNativeFunction === 'function') {
-      window.__juceGetNativeFunction('exportRequested')({});
-    }
+    callNative('exportRequested', {});
   }
 
   function onLoadPlugin() {

@@ -611,6 +611,136 @@
     }
 
     /* ============================================================
+       PLUGIN BROWSER (left panel)
+    ============================================================ */
+    #plugin-browser {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+      margin-bottom: 10px;
+    }
+
+    #plugin-search {
+      width: 100%;
+      background: #0A0A0A;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      color: #ffffff;
+      font-size: 12px;
+      font-family: inherit;
+      padding: 6px 10px;
+      outline: none;
+      margin-bottom: 8px;
+      box-sizing: border-box;
+    }
+
+    #plugin-search:focus { border-color: var(--accent); }
+    #plugin-search::placeholder { color: var(--text-muted); }
+
+    #plugin-list {
+      flex: 1;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: #0A0A0A;
+      min-height: 0;
+    }
+
+    #plugin-list::-webkit-scrollbar { width: 4px; }
+    #plugin-list::-webkit-scrollbar-track { background: transparent; }
+    #plugin-list::-webkit-scrollbar-thumb { background: #3A3A3C; border-radius: 2px; }
+
+    .plugin-list-item {
+      padding: 7px 10px;
+      font-size: 12px;
+      color: #c0c0c3;
+      cursor: pointer;
+      border-bottom: 1px solid #1C1C1E;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+
+    .plugin-list-item:last-child { border-bottom: none; }
+
+    .plugin-list-item:hover {
+      background: rgba(255,255,255,0.05);
+      color: #ffffff;
+    }
+
+    .plugin-list-item.loading {
+      color: var(--amber);
+      pointer-events: none;
+    }
+
+    .plugin-list-item .item-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .plugin-list-item .item-format {
+      font-size: 9px;
+      color: var(--text-muted);
+      background: #252527;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 1px 5px;
+      letter-spacing: 0.3px;
+      flex-shrink: 0;
+    }
+
+    .plugin-list-empty {
+      padding: 20px 12px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 11px;
+      line-height: 1.6;
+    }
+
+    #scan-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    #btn-scan {
+      flex: 1;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      border-radius: 7px;
+      padding: 6px 12px;
+      font-size: 11px;
+      font-weight: 500;
+      font-family: inherit;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+
+    #btn-scan:hover {
+      border-color: var(--text-muted);
+      color: #ffffff;
+    }
+
+    #btn-scan.scanning {
+      color: var(--amber);
+      border-color: var(--amber);
+      pointer-events: none;
+    }
+
+    #scan-count {
+      font-size: 10px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    /* ============================================================
        UTILITY
     ============================================================ */
     .hidden { display: none !important; }
@@ -726,27 +856,22 @@
     ============================================================ -->
     <div id="plugin-panel">
 
+      <!-- Loaded plugin header -->
       <div class="section-label">Loaded Plugin</div>
       <div class="plugin-name" id="plugin-name-display">No plugin loaded</div>
 
-      <div class="format-badges">
-        <span class="badge">VST3</span>
-        <span class="badge">AU</span>
-        <span class="badge">VST2</span>
+      <!-- Plugin browser (shown when no plugin UI overlay is active) -->
+      <div id="plugin-browser">
+        <div class="section-label" style="margin-top:10px">Available Plugins</div>
+        <input id="plugin-search" type="text" placeholder="Search plugins&hellip;" oninput="filterPluginList(this.value)" />
+        <div id="plugin-list">
+          <div class="plugin-list-empty">Click &ldquo;Scan&rdquo; to discover installed plugins.</div>
+        </div>
+        <div id="scan-row">
+          <button id="btn-scan" onclick="onScanPlugins()">Scan Plugins</button>
+          <span id="scan-count"></span>
+        </div>
       </div>
-
-      <div class="plugin-ui-placeholder">
-        <svg class="placeholder-icon" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <rect x="2" y="8" width="28" height="18" rx="3" stroke="#8E8E93" stroke-width="1.5"/>
-          <circle cx="10" cy="17" r="4" stroke="#8E8E93" stroke-width="1.5"/>
-          <line x1="18" y1="13" x2="28" y2="13" stroke="#8E8E93" stroke-width="1.5" stroke-linecap="round"/>
-          <line x1="18" y1="17" x2="28" y2="17" stroke="#8E8E93" stroke-width="1.5" stroke-linecap="round"/>
-          <line x1="18" y1="21" x2="24" y2="21" stroke="#8E8E93" stroke-width="1.5" stroke-linecap="round"/>
-        </svg>
-        <span class="placeholder-text">Plugin UI renders here</span>
-      </div>
-
-      <button id="btn-load-plugin" onclick="onLoadPlugin()">Load Plugin&hellip;</button>
 
     </div><!-- /plugin-panel -->
 
@@ -1313,6 +1438,109 @@
   }
 
   /* ================================================================
+     PLUGIN LIST — called by C++ via evaluateJavascript()
+  ================================================================ */
+  var allPlugins = [];  // full list from last scan
+
+  // Called by C++: handlePluginListUpdate(jsonArray)
+  function handlePluginListUpdate(plugins) {
+    allPlugins = plugins || [];
+    document.getElementById('scan-count').textContent = allPlugins.length + ' found';
+    var btn = document.getElementById('btn-scan');
+    btn.textContent = 'Rescan';
+    btn.classList.remove('scanning');
+    renderPluginList(allPlugins);
+  }
+
+  // Called by C++: handleScanProgress(count)
+  function handleScanProgress(count) {
+    var btn = document.getElementById('btn-scan');
+    btn.textContent = 'Scanning\u2026';
+    btn.classList.add('scanning');
+    document.getElementById('scan-count').textContent = count + ' found';
+    document.getElementById('plugin-list').innerHTML =
+      '<div class="plugin-list-empty">Scanning\u2026 (' + count + ' plugins found)</div>';
+  }
+
+  // Called by C++: handlePluginLoading(name)
+  function handlePluginLoading(name) {
+    document.getElementById('plugin-name-display').textContent = 'Loading ' + name + '\u2026';
+  }
+
+  // Called by C++: handlePluginLoaded(name)
+  function handlePluginLoaded(name) {
+    document.getElementById('plugin-name-display').textContent = name;
+  }
+
+  // Called by C++: handlePluginLoadError(error)
+  function handlePluginLoadError(error) {
+    document.getElementById('plugin-name-display').textContent = 'Error: ' + error;
+  }
+
+  // Called by C++: handlePluginUnloaded()
+  function handlePluginUnloaded() {
+    document.getElementById('plugin-name-display').textContent = 'No plugin loaded';
+  }
+
+  function renderPluginList(plugins) {
+    var list = document.getElementById('plugin-list');
+    if (!plugins.length) {
+      list.innerHTML = '<div class="plugin-list-empty">No plugins found.<br>Click Scan to search.</div>';
+      return;
+    }
+    list.innerHTML = plugins.map(function(p) {
+      return '<div class="plugin-list-item" onclick="onSelectPlugin(' + p.index + ')">' +
+             '<span class="item-name">' + escapeHtml(p.name) + '</span>' +
+             '<span class="item-format">' + escapeHtml(p.format) + '</span>' +
+             '</div>';
+    }).join('');
+  }
+
+  function filterPluginList(query) {
+    var q = query.toLowerCase().trim();
+    var filtered = q ? allPlugins.filter(function(p) {
+      return p.name.toLowerCase().indexOf(q) !== -1 ||
+             p.format.toLowerCase().indexOf(q) !== -1;
+    }) : allPlugins;
+    renderPluginList(filtered);
+  }
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function onSelectPlugin(index) {
+    // Mark item as loading
+    var items = document.querySelectorAll('.plugin-list-item');
+    items.forEach(function(el) { el.classList.remove('loading'); });
+    // Find the item by iterating allPlugins
+    var plugin = allPlugins.find(function(p) { return p.index === index; });
+    if (plugin) {
+      handlePluginLoading(plugin.name);
+    }
+    if (window.__JUCE__ && window.__JUCE__.backend) {
+      window.__JUCE__.backend.emitEvent('loadPluginRequested', { pluginIndex: index });
+    }
+  }
+
+  function onScanPlugins() {
+    allPlugins = [];
+    document.getElementById('scan-count').textContent = '';
+    var btn = document.getElementById('btn-scan');
+    btn.textContent = 'Scanning\u2026';
+    btn.classList.add('scanning');
+    document.getElementById('plugin-list').innerHTML =
+      '<div class="plugin-list-empty">Scanning for plugins\u2026</div>';
+    if (window.__JUCE__ && window.__JUCE__.backend) {
+      window.__JUCE__.backend.emitEvent('scanPluginsRequested', {});
+    }
+  }
+
+  /* ================================================================
      BUTTON HANDLERS
   ================================================================ */
   function onAnalyze() {
@@ -1341,9 +1569,7 @@
   }
 
   function onLoadPlugin() {
-    if (window.__JUCE__ && window.__JUCE__.backend) {
-      window.__JUCE__.backend.emitEvent('loadPluginRequested', {});
-    }
+    // Fallback — no-op, plugin loading now done via plugin list
   }
 
   /* ================================================================

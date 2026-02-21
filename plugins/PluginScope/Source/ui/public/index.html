@@ -1522,8 +1522,9 @@
     if (plugin) {
       handlePluginLoading(plugin.name);
     }
-    if (window.__JUCE__ && window.__JUCE__.backend) {
-      window.__JUCE__.backend.emitEvent('loadPluginRequested', { pluginIndex: index });
+    // withNativeFunction handlers require getNativeFunction — NOT emitEvent directly
+    if (typeof window.__juceGetNativeFunction === 'function') {
+      window.__juceGetNativeFunction('loadPluginRequested')({ pluginIndex: index });
     }
   }
 
@@ -1535,8 +1536,9 @@
     btn.classList.add('scanning');
     document.getElementById('plugin-list').innerHTML =
       '<div class="plugin-list-empty">Scanning for plugins\u2026</div>';
-    if (window.__JUCE__ && window.__JUCE__.backend) {
-      window.__JUCE__.backend.emitEvent('scanPluginsRequested', {});
+    // withNativeFunction handlers require getNativeFunction — NOT emitEvent directly
+    if (typeof window.__juceGetNativeFunction === 'function') {
+      window.__juceGetNativeFunction('scanPluginsRequested')({});
     }
   }
 
@@ -1553,8 +1555,8 @@
       drawGraph(tabKeys[state.analysisType] || 'frequency', state.comparison !== 0);
     }, 800);
     // Notify C++ that analyze was triggered
-    if (window.__JUCE__ && window.__JUCE__.backend) {
-      window.__JUCE__.backend.emitEvent('analyzeRequested', {
+    if (typeof window.__juceGetNativeFunction === 'function') {
+      window.__juceGetNativeFunction('analyzeRequested')({
         testSignal: state.testSignal,
         analysisType: state.analysisType,
         analysisMode: state.analysisMode
@@ -1563,8 +1565,8 @@
   }
 
   function onExport() {
-    if (window.__JUCE__ && window.__JUCE__.backend) {
-      window.__JUCE__.backend.emitEvent('exportRequested', {});
+    if (typeof window.__juceGetNativeFunction === 'function') {
+      window.__juceGetNativeFunction('exportRequested')({});
     }
   }
 

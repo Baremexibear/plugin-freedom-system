@@ -1,211 +1,458 @@
 #include "PluginEditor.h"
+#include "BinaryData.h"
+
+//==============================================================================
+// Helper: wrap a BinaryData pointer into the Resource vector format.
+static std::vector<std::byte> makeByteVector (const char* data, int size)
+{
+    return std::vector<std::byte> (
+        reinterpret_cast<const std::byte*> (data),
+        reinterpret_cast<const std::byte*> (data) + size);
+}
 
 //==============================================================================
 PluginScopeAudioProcessorEditor::PluginScopeAudioProcessorEditor (PluginScopeAudioProcessor& p)
-    : AudioProcessorEditor (&p), processorRef (p)
+    : AudioProcessorEditor (&p),
+      processorRef (p),
+
+      //------------------------------------------------------------------------
+      // 1. RELAYS FIRST — create before webView.
+      //    Parameter ID strings MUST exactly match APVTS parameter IDs.
+      //------------------------------------------------------------------------
+      viewModeRelay     (std::make_unique<juce::WebComboBoxRelay> ("view_mode")),
+      analysisModeRelay (std::make_unique<juce::WebComboBoxRelay> ("analysis_mode")),
+      analysisTypeRelay (std::make_unique<juce::WebComboBoxRelay> ("analysis_type")),
+      testSignalRelay   (std::make_unique<juce::WebComboBoxRelay> ("test_signal")),
+      comparisonRelay   (std::make_unique<juce::WebComboBoxRelay> ("comparison")),
+
+      //------------------------------------------------------------------------
+      // 2. WEBVIEW SECOND — constructed with Options referencing all relays.
+      //    .withOptionsFrom() registers each relay with the WebView backend.
+      //    Resource provider serves index.html and JS from BinaryData.
+      //    Native functions handle custom events from JavaScript.
+      //------------------------------------------------------------------------
+      webView (std::make_unique<juce::WebBrowserComponent> (
+          juce::WebBrowserComponent::Options{}
+              .withWinWebView2Options (
+                  juce::WebBrowserComponent::Options::WinWebView2{}
+                      .withUserDataFolder (juce::File::getSpecialLocation (juce::File::tempDirectory)))
+              .withResourceProvider (
+                  [this] (const auto& url) { return getResource (url); },
+                  juce::String {"https://pluginscope.localhost/"})
+              // Native functions: one per event type emitted by the HTML.
+              // The HTML calls window.__JUCE__.backend.emitEvent(eventName, data)
+              // which dispatches to the native function registered with that name.
+              .withNativeFunction (
+                  "analyzeRequested",
+                  [this] (const juce::Array<juce::var>& args,
+                          juce::WebBrowserComponent::NativeFunctionCompletion completion)
+                  {
+                      juce::var data = args.size() > 0 ? args[0] : juce::var (new juce::DynamicObject());
+                      if (auto* obj = data.getDynamicObject())
+                          obj->setProperty ("type", "analyzeRequested");
+                      handleNativeEvent (data);
+                      completion ("ok");
+                  })
+              .withNativeFunction (
+                  "loadPluginRequested",
+                  [this] (const juce::Array<juce::var>& args,
+                          juce::WebBrowserComponent::NativeFunctionCompletion completion)
+                  {
+                      juce::var data = args.size() > 0 ? args[0] : juce::var (new juce::DynamicObject());
+                      if (auto* obj = data.getDynamicObject())
+                          obj->setProperty ("type", "loadPluginRequested");
+                      handleNativeEvent (data);
+                      completion ("ok");
+                  })
+              .withNativeFunction (
+                  "unloadPluginRequested",
+                  [this] (const juce::Array<juce::var>& args,
+                          juce::WebBrowserComponent::NativeFunctionCompletion completion)
+                  {
+                      juce::var data = args.size() > 0 ? args[0] : juce::var (new juce::DynamicObject());
+                      if (auto* obj = data.getDynamicObject())
+                          obj->setProperty ("type", "unloadPluginRequested");
+                      handleNativeEvent (data);
+                      completion ("ok");
+                  })
+              .withNativeFunction (
+                  "scanPluginsRequested",
+                  [this] (const juce::Array<juce::var>& args,
+                          juce::WebBrowserComponent::NativeFunctionCompletion completion)
+                  {
+                      juce::var data = args.size() > 0 ? args[0] : juce::var (new juce::DynamicObject());
+                      if (auto* obj = data.getDynamicObject())
+                          obj->setProperty ("type", "scanPluginsRequested");
+                      handleNativeEvent (data);
+                      completion ("ok");
+                  })
+              .withNativeFunction (
+                  "exportRequested",
+                  [this] (const juce::Array<juce::var>& args,
+                          juce::WebBrowserComponent::NativeFunctionCompletion completion)
+                  {
+                      juce::var data = args.size() > 0 ? args[0] : juce::var (new juce::DynamicObject());
+                      if (auto* obj = data.getDynamicObject())
+                          obj->setProperty ("type", "exportRequested");
+                      handleNativeEvent (data);
+                      completion ("ok");
+                  })
+              .withNativeFunction (
+                  "parameterChanged",
+                  [this] (const juce::Array<juce::var>& args,
+                          juce::WebBrowserComponent::NativeFunctionCompletion completion)
+                  {
+                      // Relay system handles parameter sync automatically.
+                      // This native function accepts the call gracefully and ignores it.
+                      juce::ignoreUnused (args);
+                      completion ("ok");
+                  })
+              // Register all 5 relays — enables bidirectional parameter sync
+              .withOptionsFrom (*viewModeRelay)
+              .withOptionsFrom (*analysisModeRelay)
+              .withOptionsFrom (*analysisTypeRelay)
+              .withOptionsFrom (*testSignalRelay)
+              .withOptionsFrom (*comparisonRelay)
+      )),
+
+      //------------------------------------------------------------------------
+      // 3. ATTACHMENTS LAST — created after relays AND webView exist.
+      //    WebComboBoxParameterAttachment(parameter, relay)
+      //    Uses processorRef.parameters (NOT processorRef.apvts).
+      //------------------------------------------------------------------------
+      viewModeAttachment (std::make_unique<juce::WebComboBoxParameterAttachment> (
+          *processorRef.parameters.getParameter ("view_mode"),
+          *viewModeRelay)),
+
+      analysisModeAttachment (std::make_unique<juce::WebComboBoxParameterAttachment> (
+          *processorRef.parameters.getParameter ("analysis_mode"),
+          *analysisModeRelay)),
+
+      analysisTypeAttachment (std::make_unique<juce::WebComboBoxParameterAttachment> (
+          *processorRef.parameters.getParameter ("analysis_type"),
+          *analysisTypeRelay)),
+
+      testSignalAttachment (std::make_unique<juce::WebComboBoxParameterAttachment> (
+          *processorRef.parameters.getParameter ("test_signal"),
+          *testSignalRelay)),
+
+      comparisonAttachment (std::make_unique<juce::WebComboBoxParameterAttachment> (
+          *processorRef.parameters.getParameter ("comparison"),
+          *comparisonRelay))
 {
-    setSize (1100, 700);
+    // Add WebView (fills entire window)
+    addAndMakeVisible (*webView);
 
-    //--------------------------------------------------------------------------
-    // Phase 3.1: Native hosted plugin panel (right area, fills remaining width)
-
+    // Add hosted plugin overlay panel (sits on top of WebView left panel area)
+    // Initially invisible — shown when a plugin loads
+    hostedPluginPanel.setVisible (false);
     addAndMakeVisible (hostedPluginPanel);
 
-    //--------------------------------------------------------------------------
-    // Plugin list (left panel, upper area)
+    // Navigate to embedded resource root
+    webView->goToURL ("https://pluginscope.localhost/index.html");
 
-    pluginListModel = std::make_unique<PluginListModel> (*this);
-    pluginListBox.setModel (pluginListModel.get());
-    pluginListBox.setColour (juce::ListBox::backgroundColourId, juce::Colour (0xff111122));
-    pluginListBox.setColour (juce::ListBox::outlineColourId,    juce::Colour (0xff333355));
-    pluginListBox.setRowHeight (22);
-    addAndMakeVisible (pluginListBox);
+    // Listen for scan progress / completion updates
+    processorRef.scanBroadcaster.addChangeListener (this);
 
-    //--------------------------------------------------------------------------
-    // Scan / Load / Unload buttons
+    // Default window size (1100 x 650) — resizable
+    setSize (1100, 650);
+    setResizable (true, true);
 
-    // Scan button: triggers manual plugin scan.
-    // Scanning is NOT automatic on startup because loading plugins in-process
-    // on a background thread races with other plugins' initialization and
-    // causes crashes in the host. Scan when the project is fully loaded.
-    scanButton.onClick = [this]
+    // Enforce min/max resize bounds
+    if (auto* constrainer = getConstrainer())
     {
-        processorRef.scanComplete.store (false);
-        statusLabel.setText ("Scanning...", juce::dontSendNotification);
-        processorRef.startPluginScan();
-    };
-    scanButton.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xff1e4a1e));
-    scanButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
-    addAndMakeVisible (scanButton);
+        constrainer->setMinimumSize (900, 520);
+        constrainer->setMaximumSize (2560, 1600);
+    }
 
-    loadButton.onClick = [this] { loadSelectedPlugin(); };
-    loadButton.setColour (juce::TextButton::buttonColourId,   juce::Colour (0xff1e3a6e));
-    loadButton.setColour (juce::TextButton::textColourOffId,  juce::Colours::white);
-    addAndMakeVisible (loadButton);
-
-    unloadButton.onClick = [this]
-    {
-        processorRef.unloadPlugin();
-        removeHostedEditor();
-        statusLabel.setText ("No plugin loaded", juce::dontSendNotification);
-    };
-    unloadButton.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xff3a1e1e));
-    unloadButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
-    addAndMakeVisible (unloadButton);
-
-    //--------------------------------------------------------------------------
-    // Status label
-
-    statusLabel.setText ("Click 'Scan Plugins' to discover installed plugins",
-                         juce::dontSendNotification);
-    statusLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    statusLabel.setFont (juce::FontOptions (12.0f));
-    statusLabel.setJustificationType (juce::Justification::centredLeft);
-    addAndMakeVisible (statusLabel);
-
-    //--------------------------------------------------------------------------
-    // Listen for scan progress (message thread callback)
-
-    scanListener = std::make_unique<ScanListener> (*this);
-    processorRef.scanBroadcaster.addChangeListener (scanListener.get());
-
-    // Populate from any already-cached results
-    updatePluginList();
+    // Populate plugin list if scan already completed
+    pushPluginListToWebView();
 }
 
+//==============================================================================
 PluginScopeAudioProcessorEditor::~PluginScopeAudioProcessorEditor()
 {
     // Stop listening for scan updates before any members are destroyed
-    processorRef.scanBroadcaster.removeChangeListener (scanListener.get());
+    processorRef.scanBroadcaster.removeChangeListener (this);
 
-    // Remove hosted editor from its parent before unique_ptr destructs it
+    // Remove hosted editor before unique_ptr destructs it
     removeHostedEditor();
 
-    // Destruction order is guaranteed by declaration order in the header:
-    //   attachments -> webView -> relays  (reverse of declaration)
+    // Member destruction order (reverse of declaration):
+    //   comparisonAttachment, testSignalAttachment, analysisTypeAttachment,
+    //   analysisModeAttachment, viewModeAttachment  (attachments destroyed first)
+    //   webView                                      (then webView)
+    //   comparisonRelay, testSignalRelay, analysisTypeRelay,
+    //   analysisModeRelay, viewModeRelay             (relays destroyed last)
     // No manual reset() calls required.
 }
 
 //==============================================================================
 void PluginScopeAudioProcessorEditor::paint (juce::Graphics& g)
 {
-    // Dark background consistent with the v1 mockup aesthetic
-    g.fillAll (juce::Colour (0xff0d0d1a));
-
-    // Subtle accent line at the top
-    g.setColour (juce::Colour (0xff4a90d9));
-    g.fillRect (0, 0, getWidth(), 2);
-
-    // Divider line between left panel and hosted editor area
-    g.setColour (juce::Colour (0xff333355));
-    g.fillRect (280, 0, 1, getHeight());
+    // Background colour matches CSS --bg: #121212
+    // WebView covers the entire bounds; this only shows if WebView hasn't loaded yet.
+    g.fillAll (juce::Colour (0xff121212));
 }
 
 //==============================================================================
 void PluginScopeAudioProcessorEditor::resized()
 {
-    auto area = getLocalBounds();
+    // WebView fills the entire editor window.
+    // HTML/CSS handles all internal layout via percentage-based flexbox.
+    webView->setBounds (getLocalBounds());
 
-    // Left panel: 280px wide — plugin list + controls
-    auto leftPanel = area.removeFromLeft (280);
+    // Hosted plugin panel occupies left panel area (first 32% of width, matching CSS #plugin-panel)
+    // min 240px, max 400px — matches CSS constraints
+    const int leftPanelWidth = juce::jlimit (240, 400, (int) (getWidth() * 0.32f));
+    const int toolbarHeight  = 52;   // CSS: #toolbar height: 52px
+    const int summaryHeight  = 148;  // CSS: #summary-panel height: 148px
 
-    // Status label at the top
-    statusLabel.setBounds (leftPanel.removeFromTop (28).reduced (4, 4));
+    // Hosted plugin panel sits in the left panel below the toolbar
+    hostedPluginPanel.setBounds (0, toolbarHeight,
+                                 leftPanelWidth,
+                                 getHeight() - toolbarHeight - summaryHeight);
 
-    // Buttons at the bottom (bottom-up order)
-    unloadButton.setBounds (leftPanel.removeFromBottom (36).reduced (4, 4));
-    loadButton  .setBounds (leftPanel.removeFromBottom (36).reduced (4, 4));
-    scanButton  .setBounds (leftPanel.removeFromBottom (36).reduced (4, 4));
-
-    // Plugin list fills remaining left panel area
-    pluginListBox.setBounds (leftPanel.reduced (4, 4));
-
-    // Right side: hosted plugin editor panel (fills remaining area after divider)
-    // Skip the 1-pixel divider drawn in paint()
-    area.removeFromLeft (1);
-    hostedPluginPanel.setBounds (area);
-
-    // If a hosted editor is embedded, resize it to fill the panel
+    // Resize hosted editor to fill the panel
     if (hostedPluginEditor != nullptr)
         hostedPluginEditor->setBounds (hostedPluginPanel.getLocalBounds());
 }
 
 //==============================================================================
-void PluginScopeAudioProcessorEditor::updatePluginList()
+// Resource provider — called by WebBrowserComponent when JS requests a URL.
+// Uses EXPLICIT URL mapping (Pattern #8) — no generic BinaryData loop.
+//
+// BinaryData symbol naming:
+//   juce_add_binary_data strips path components and replaces . and / with _
+//   "index.html"                     -> BinaryData::index_html
+//   "js/juce/index.js"               -> BinaryData::index_js
+//   "js/juce/check_native_interop.js"-> BinaryData::check_native_interop_js
+//
+// MIME types:
+//   .html  -> "text/html"
+//   .js    -> "application/javascript"   (MIME standard, not "text/javascript")
+//==============================================================================
+std::optional<juce::WebBrowserComponent::Resource>
+PluginScopeAudioProcessorEditor::getResource (const juce::String& url)
 {
-    // Must be called on the message thread (ScanListener ensures this).
-    //
-    // THREADING: KnownPluginList is NOT thread-safe. The scan thread writes to
-    // it via PluginDirectoryScanner::scanNextFile() while intermediate callAsync
-    // messages arrive here. Reading getTypes() concurrently with scanNextFile()
-    // is a data race that causes crashes.
-    //
-    // FIX: During scanning, only update the progress label — never read the list.
-    // Once scanComplete is true, the scan thread has stopped writing and all
-    // writes are visible (seq_cst store/load fence), so getTypes() is safe.
+    // Strip query string and leading slash to get the path component
+    auto path = juce::URL (url).getSubPath().trimCharactersAtStart ("/");
 
-    if (!processorRef.scanComplete.load())
+    // Root or explicit index.html request
+    if (path.isEmpty() || path == "index.html")
     {
-        // Scan in progress — just show progress count, do NOT read the list
-        statusLabel.setText ("Scanning... " + juce::String (processorRef.scanScannedCount.load()) + " found",
-                             juce::dontSendNotification);
-        return;
+        return juce::WebBrowserComponent::Resource {
+            makeByteVector (BinaryData::index_html, BinaryData::index_htmlSize),
+            "text/html"
+        };
     }
 
-    // Scan complete — safe to read the full list exactly once
-    pluginListItems.clear();
-    knownDescs.clear();
-
-    auto plugins = processorRef.getKnownPlugins();
-    for (auto& desc : plugins)
+    // JUCE WebView JS bridge
+    if (path == "js/juce/index.js")
     {
-        pluginListItems.add (desc.name + " [" + desc.pluginFormatName + "]");
-        knownDescs.add (desc);
+        return juce::WebBrowserComponent::Resource {
+            makeByteVector (BinaryData::index_js, BinaryData::index_jsSize),
+            "application/javascript"
+        };
     }
 
-    if (plugins.isEmpty())
-        statusLabel.setText ("No plugins found — click 'Scan Plugins'",
-                             juce::dontSendNotification);
-    else
-        statusLabel.setText (juce::String (plugins.size()) + " plugins found",
-                             juce::dontSendNotification);
+    // JUCE native interop check script (Pattern #13 — required for bridge stability)
+    if (path == "js/juce/check_native_interop.js")
+    {
+        return juce::WebBrowserComponent::Resource {
+            makeByteVector (BinaryData::check_native_interop_js,
+                            BinaryData::check_native_interop_jsSize),
+            "application/javascript"
+        };
+    }
 
-    pluginListBox.updateContent();
-    pluginListBox.repaint();
+    // Unknown path — return 404
+    juce::Logger::writeToLog ("[PluginScope] Resource not found: " + url);
+    return std::nullopt;
 }
 
 //==============================================================================
-void PluginScopeAudioProcessorEditor::loadSelectedPlugin()
+// ChangeListener callback — fires on message thread when scan progress updates.
+// Pushes plugin list to WebView when scan completes.
+//==============================================================================
+void PluginScopeAudioProcessorEditor::changeListenerCallback (juce::ChangeBroadcaster* /*source*/)
 {
-    const int selectedRow = pluginListBox.getSelectedRow();
+    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
+    pushPluginListToWebView();
+}
 
-    if (selectedRow < 0 || selectedRow >= knownDescs.size())
+//==============================================================================
+// Push the current plugin list to JavaScript as a JSON array.
+// Called after scan completes or when the editor opens with cached results.
+//==============================================================================
+void PluginScopeAudioProcessorEditor::pushPluginListToWebView()
+{
+    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
+
+    if (!processorRef.scanComplete.load())
     {
-        statusLabel.setText ("Select a plugin first", juce::dontSendNotification);
+        // Scan still in progress — push progress status
+        int count = processorRef.scanScannedCount.load();
+        juce::String js = "if (typeof handleScanProgress === 'function') handleScanProgress("
+                          + juce::String (count) + ");";
+        if (webView != nullptr)
+            webView->evaluateJavascript (js, [] (juce::WebBrowserComponent::EvaluationResult) {});
         return;
     }
 
-    const auto desc = knownDescs[selectedRow];
-    statusLabel.setText ("Loading " + desc.name + "...", juce::dontSendNotification);
+    // Scan complete — build JSON array and push full list
+    knownDescs.clear();
+    knownDescs = processorRef.getKnownPlugins();
 
-    // Remove any currently embedded editor before loading the new plugin
-    removeHostedEditor();
+    juce::String jsonArray = "[";
+    bool first = true;
+    for (int i = 0; i < knownDescs.size(); ++i)
+    {
+        const auto& desc = knownDescs[i];
+        if (!first) jsonArray += ",";
+        first = false;
 
-    processorRef.loadPlugin (
-        desc,
-        [this, name = desc.name] (bool success, const juce::String& error)
+        // Escape plugin name (remove double-quotes to avoid JSON injection)
+        juce::String safeName = desc.name.replace ("\"", "\\\"");
+        juce::String safeFormat = desc.pluginFormatName.replace ("\"", "\\\"");
+
+        jsonArray += "{\"index\":" + juce::String (i)
+                   + ",\"name\":\"" + safeName + "\""
+                   + ",\"format\":\"" + safeFormat + "\""
+                   + "}";
+    }
+    jsonArray += "]";
+
+    juce::String js = "if (typeof handlePluginListUpdate === 'function') handlePluginListUpdate("
+                      + jsonArray + ");";
+
+    if (webView != nullptr)
+        webView->evaluateJavascript (js, [] (juce::WebBrowserComponent::EvaluationResult) {});
+}
+
+//==============================================================================
+// Native event handler — called when JavaScript fires:
+//   window.__JUCE__.backend.emitEvent('pluginscopeEvent', data)
+//
+// Expected event data format (juce::var object):
+//   { "type": "analyzeRequested",    "testSignal": 0, "analysisType": 0 }
+//   { "type": "loadPluginRequested", "pluginIndex": N }
+//   { "type": "unloadPluginRequested" }
+//   { "type": "scanPluginsRequested" }
+//   { "type": "exportRequested" }
+//   { "type": "parameterChanged",    "id": "view_mode", "index": 0 }
+//
+// NOTE: "parameterChanged" events are redundant when WebComboBoxParameterAttachment
+// is used (the relay handles bidirectional sync automatically), but they are
+// handled here gracefully for completeness.
+//==============================================================================
+void PluginScopeAudioProcessorEditor::handleNativeEvent (const juce::var& eventData)
+{
+    if (!eventData.isObject())
+        return;
+
+    auto* obj = eventData.getDynamicObject();
+    if (obj == nullptr)
+        return;
+
+    auto type = obj->getProperty ("type").toString();
+
+    if (type == "analyzeRequested")
+    {
+        // Analysis is triggered by parameter changes (analysis_type, test_signal, analysis_mode)
+        // which are handled by the relay/attachment system. No additional C++ action needed here
+        // for Phase 4.1 (Phase 4.2 will add live data push).
+        juce::Logger::writeToLog ("[PluginScope] analyzeRequested from WebView");
+    }
+    else if (type == "loadPluginRequested")
+    {
+        // JavaScript requests loading a plugin by index in knownDescs
+        // In Phase 4.1, the WebView "Load Plugin..." button fires this with no index —
+        // it opens the plugin browser overlay in the native component.
+        // If pluginIndex is provided, load that specific plugin.
+        auto pluginIndexVar = obj->getProperty ("pluginIndex");
+        if (pluginIndexVar.isInt() || pluginIndexVar.isDouble())
         {
-            // Callback fires on message thread
-            if (success)
+            const int pluginIndex = static_cast<int> (pluginIndexVar);
+            if (pluginIndex >= 0 && pluginIndex < knownDescs.size())
             {
-                statusLabel.setText (name + " loaded", juce::dontSendNotification);
-                embedHostedEditor();
+                const auto desc = knownDescs[pluginIndex];
+
+                // Remove any currently embedded editor
+                removeHostedEditor();
+
+                // Notify JS of loading state
+                if (webView != nullptr)
+                {
+                    juce::String loadingJs = "if (typeof handlePluginLoading === 'function') "
+                                             "handlePluginLoading(\"" +
+                                             desc.name.replace ("\"", "\\\"") + "\");";
+                    webView->evaluateJavascript (loadingJs,
+                                                 [] (juce::WebBrowserComponent::EvaluationResult) {});
+                }
+
+                // Use lifetime sentinel to guard the callback
+                auto sentinel = processorRef.processorAlive;
+
+                processorRef.loadPlugin (
+                    desc,
+                    [this, name = desc.name, sentinel] (bool success, const juce::String& error)
+                    {
+                        // Callback fires on message thread
+                        if (!sentinel->load()) return;
+
+                        juce::String js;
+                        if (success)
+                        {
+                            embedHostedEditor();
+                            js = "if (typeof handlePluginLoaded === 'function') "
+                                 "handlePluginLoaded(\"" + name.replace ("\"", "\\\"") + "\");";
+                        }
+                        else
+                        {
+                            js = "if (typeof handlePluginLoadError === 'function') "
+                                 "handlePluginLoadError(\"" + error.replace ("\"", "\\\"") + "\");";
+                        }
+
+                        if (webView != nullptr)
+                            webView->evaluateJavascript (js,
+                                                          [] (juce::WebBrowserComponent::EvaluationResult) {});
+                    });
             }
-            else
-            {
-                statusLabel.setText ("Failed: " + error, juce::dontSendNotification);
-            }
-        });
+        }
+        else
+        {
+            // No index — just push the current plugin list so the JS can show a picker
+            pushPluginListToWebView();
+        }
+    }
+    else if (type == "unloadPluginRequested")
+    {
+        processorRef.unloadPlugin();
+        removeHostedEditor();
+
+        if (webView != nullptr)
+        {
+            juce::String js = "if (typeof handlePluginUnloaded === 'function') handlePluginUnloaded();";
+            webView->evaluateJavascript (js, [] (juce::WebBrowserComponent::EvaluationResult) {});
+        }
+    }
+    else if (type == "scanPluginsRequested")
+    {
+        processorRef.scanComplete.store (false);
+        processorRef.startPluginScan();
+    }
+    else if (type == "exportRequested")
+    {
+        // Phase 4.2: Implement export. Phase 4.1: placeholder.
+        juce::Logger::writeToLog ("[PluginScope] exportRequested — not yet implemented (Phase 4.2)");
+    }
+    else if (type == "parameterChanged")
+    {
+        // Relay system handles this automatically via WebComboBoxParameterAttachment.
+        // This branch exists only for debugging / future override use.
+        juce::Logger::writeToLog ("[PluginScope] parameterChanged from WebView (relay handles this automatically)");
+    }
 }
 
 //==============================================================================
@@ -224,12 +471,15 @@ void PluginScopeAudioProcessorEditor::embedHostedEditor()
         hostedPluginEditor.reset (plugin->createEditor());
         if (hostedPluginEditor != nullptr)
         {
+            hostedPluginPanel.setVisible (true);
             hostedPluginPanel.addAndMakeVisible (*hostedPluginEditor);
             hostedPluginEditor->setBounds (hostedPluginPanel.getLocalBounds());
+            resized(); // Re-layout so hosted editor gets correct size
         }
     }
 }
 
+//==============================================================================
 void PluginScopeAudioProcessorEditor::removeHostedEditor()
 {
     if (hostedPluginEditor != nullptr)
@@ -237,4 +487,5 @@ void PluginScopeAudioProcessorEditor::removeHostedEditor()
         hostedPluginPanel.removeChildComponent (hostedPluginEditor.get());
         hostedPluginEditor.reset();
     }
+    hostedPluginPanel.setVisible (false);
 }

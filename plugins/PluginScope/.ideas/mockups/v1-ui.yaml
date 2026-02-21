@@ -1,0 +1,436 @@
+---
+# PluginScope UI Mockup v1
+# Generated: 2026-02-19
+# Layout: Fluid flexbox (percentage-based, not fixed pixel positions)
+# Note: This plugin has no audio-processing parameters — all controls are
+#       UI state selectors (combo/choice). Layout is resizable from 1100x650.
+
+metadata:
+  plugin_name: PluginScope
+  version: v1
+  window_default: "1100x650"
+  resizable: true
+  layout_model: fluid  # All panels use percentage widths, not absolute px positions
+  style: modern-dark
+
+window:
+  width: 1100
+  height: 650
+  min_width: 900
+  min_height: 520
+  resizable: true
+  background: "#121212"
+
+# --- PARAMETERS ---
+# All are choice/combo controls — no float sliders
+controls:
+  - id: view_mode
+    type: combo
+    label: "View Mode"
+    options: ["Simplified", "Expert"]
+    default: "Simplified"
+    ui_widget: pill_toggle
+    location: toolbar_center_left
+
+  - id: analysis_mode
+    type: combo
+    label: "Analysis Mode"
+    options: ["Live", "Snapshot"]
+    default: "Live"
+    ui_widget: pill_toggle
+    location: toolbar_center
+
+  - id: analysis_type
+    type: combo
+    label: "Analysis Type"
+    options: ["Frequency Response", "Dynamics Curve", "Harmonic Distortion", "Phase Response", "Latency"]
+    default: "Frequency Response"
+    ui_widget: pill_tabs
+    location: graph_panel_header
+
+  - id: test_signal
+    type: combo
+    label: "Test Signal"
+    options: ["Sine Sweep", "White Noise", "Pink Noise", "Impulse", "Live Audio"]
+    default: "Sine Sweep"
+    ui_widget: dropdown_select
+    location: toolbar_center_right
+
+  - id: comparison
+    type: combo
+    label: "Comparison"
+    options: ["Off", "A/B Plugins", "Before-After"]
+    default: "Off"
+    ui_widget: dropdown_select
+    location: toolbar_right
+
+# --- LAYOUT ---
+layout:
+  structure: column_flex  # top toolbar + main row + bottom panel
+  panels:
+
+    - id: toolbar
+      role: top_bar
+      height_px: 52
+      height_mode: fixed
+      background: "#1A1A1A"
+      border_bottom: "1px solid #2C2C2E"
+      padding: "0 20px"
+      display: flex
+      align_items: center
+      gap: 16
+      children:
+        - id: logo_text
+          type: text
+          content: "PluginScope"
+          font_size: 18
+          font_weight: 700
+          color: "#0A84FF"
+          font_family: "Inter, system-ui, sans-serif"
+          letter_spacing: "-0.3px"
+
+        - id: toolbar_divider_1
+          type: divider
+          orientation: vertical
+          color: "#2C2C2E"
+          height: 24
+
+        - id: view_mode_toggle
+          type: pill_toggle
+          control_id: view_mode
+          options: ["Simplified", "Expert"]
+          active_bg: "#0A84FF"
+          active_text: "#FFFFFF"
+          inactive_bg: "#2C2C2E"
+          inactive_text: "#8E8E93"
+          border_radius: 20
+          font_size: 12
+          padding: "5px 14px"
+
+        - id: analysis_mode_toggle
+          type: pill_toggle
+          control_id: analysis_mode
+          options: ["Live", "Snapshot"]
+          active_bg: "#30D158"
+          active_text: "#FFFFFF"
+          inactive_bg: "#2C2C2E"
+          inactive_text: "#8E8E93"
+          border_radius: 20
+          font_size: 12
+          padding: "5px 14px"
+          active_option_colors:
+            Live: "#30D158"
+            Snapshot: "#FF9F0A"
+
+        - id: test_signal_select
+          type: compact_dropdown
+          control_id: test_signal
+          label: "Signal"
+          background: "#2C2C2E"
+          text: "#FFFFFF"
+          border_radius: 8
+          font_size: 12
+          padding: "5px 10px"
+
+        - id: toolbar_spacer
+          type: spacer
+          flex: 1
+
+        - id: comparison_select
+          type: compact_dropdown
+          control_id: comparison
+          label: "Compare"
+          background: "#2C2C2E"
+          text: "#8E8E93"
+          border_radius: 8
+          font_size: 12
+          padding: "5px 10px"
+
+        - id: analyze_button
+          type: button
+          label: "▶  Analyze"
+          background: "#0A84FF"
+          text: "#FFFFFF"
+          border_radius: 8
+          font_size: 13
+          font_weight: 600
+          padding: "7px 18px"
+          hover_background: "#3399FF"
+
+        - id: export_button
+          type: icon_button
+          icon: "export"
+          label: "Export"
+          background: "transparent"
+          border: "1px solid #2C2C2E"
+          text: "#8E8E93"
+          border_radius: 8
+          size: 32
+
+    - id: main_row
+      role: content_area
+      flex: 1
+      display: flex
+      flex_direction: row
+      overflow: hidden
+      children:
+
+        - id: hosted_plugin_panel
+          role: left_panel
+          width_percent: 32
+          min_width_px: 260
+          background: "#1A1A1A"
+          border_right: "1px solid #2C2C2E"
+          display: flex
+          flex_direction: column
+          padding: 20
+          children:
+            - id: loaded_plugin_label
+              type: label
+              content: "LOADED PLUGIN"
+              font_size: 10
+              font_weight: 600
+              color: "#8E8E93"
+              letter_spacing: "1.2px"
+              margin_bottom: 8
+
+            - id: plugin_name_display
+              type: text
+              content: "No plugin loaded"
+              font_size: 16
+              font_weight: 500
+              color: "#FFFFFF"
+              opacity: 0.35
+              margin_bottom: 4
+
+            - id: format_badges
+              type: badge_row
+              margin_bottom: 16
+              badges:
+                - label: "VST3"
+                  background: "#2C2C2E"
+                  text: "#8E8E93"
+                  border_radius: 4
+                  font_size: 10
+                  padding: "2px 7px"
+                - label: "AU"
+                  background: "#2C2C2E"
+                  text: "#8E8E93"
+                  border_radius: 4
+                  font_size: 10
+                  padding: "2px 7px"
+                - label: "VST2"
+                  background: "#2C2C2E"
+                  text: "#8E8E93"
+                  border_radius: 4
+                  font_size: 10
+                  padding: "2px 7px"
+
+            - id: plugin_ui_placeholder
+              type: placeholder_rect
+              flex: 1
+              background: "#0D0D0D"
+              border: "1px dashed #2C2C2E"
+              border_radius: 8
+              content_label: "Plugin UI renders here"
+              content_color: "#3A3A3C"
+              content_font_size: 12
+              margin_bottom: 16
+
+            - id: load_plugin_button
+              type: button
+              label: "Load Plugin..."
+              style: outlined
+              background: "transparent"
+              border: "1px solid #0A84FF"
+              text: "#0A84FF"
+              border_radius: 8
+              font_size: 13
+              font_weight: 500
+              padding: "8px 16px"
+              width: "100%"
+
+        - id: analysis_panel
+          role: right_panel
+          flex: 1
+          background: "#121212"
+          display: flex
+          flex_direction: column
+          overflow: hidden
+          children:
+
+            - id: analysis_tabs_bar
+              role: tab_header
+              height_px: 52
+              height_mode: fixed
+              display: flex
+              align_items: center
+              padding: "0 20px"
+              gap: 6
+              border_bottom: "1px solid #2C2C2E"
+              background: "#1A1A1A"
+              children:
+                - id: tab_frequency
+                  type: pill_tab
+                  label: "Frequency"
+                  state: active
+                  active_bg: "#0A84FF"
+                  active_text: "#FFFFFF"
+                  inactive_bg: "transparent"
+                  inactive_text: "#8E8E93"
+                  border_radius: 20
+                  font_size: 12
+                  padding: "5px 14px"
+                - id: tab_dynamics
+                  type: pill_tab
+                  label: "Dynamics"
+                  state: inactive
+                - id: tab_distortion
+                  type: pill_tab
+                  label: "Distortion"
+                  state: inactive
+                - id: tab_phase
+                  type: pill_tab
+                  label: "Phase"
+                  state: inactive
+                - id: tab_latency
+                  type: pill_tab
+                  label: "Latency"
+                  state: inactive
+
+            - id: graph_canvas_area
+              role: graph
+              flex: 1
+              background: "#0D0D0D"
+              padding: "16px 20px 12px 56px"  # left pad for y-axis labels
+              position: relative
+              children:
+                - id: graph_canvas
+                  type: canvas
+                  width: "100%"
+                  height: "100%"
+                  grid_color: "#2C2C2E"
+                  grid_opacity: 0.6
+                  curve_color: "#0A84FF"
+                  curve_line_width: 2
+                  fill_gradient_top: "rgba(10, 132, 255, 0.30)"
+                  fill_gradient_bottom: "rgba(10, 132, 255, 0.00)"
+                  x_axis:
+                    type: frequency
+                    labels: ["20Hz", "100Hz", "200Hz", "500Hz", "1kHz", "2kHz", "5kHz", "10kHz", "20kHz"]
+                    color: "#8E8E93"
+                    font_size: 10
+                  y_axis:
+                    type: decibels
+                    labels: ["+18", "+12", "+6", "0", "-6", "-12", "-18"]
+                    simplified_labels: ["High", "Mid", "Low"]
+                    color: "#8E8E93"
+                    font_size: 10
+                  frequency_zones:
+                    - zone: lows
+                      range: "20–300Hz"
+                      bg_tint: "rgba(255, 159, 10, 0.04)"
+                    - zone: mids
+                      range: "300Hz–4kHz"
+                      bg_tint: "rgba(255,255,255, 0.0)"
+                    - zone: highs
+                      range: "4kHz–20kHz"
+                      bg_tint: "rgba(10, 132, 255, 0.04)"
+
+    - id: summary_panel
+      role: bottom_panel
+      height_px: 148
+      height_mode: fixed
+      background: "#1A1A1A"
+      border_top: "1px solid #2C2C2E"
+      display: flex
+      flex_direction: column
+      children:
+        - id: summary_tab_strip
+          type: tab_strip
+          height_px: 36
+          background: "#1A1A1A"
+          border_bottom: "1px solid #2C2C2E"
+          padding: "0 20px"
+          display: flex
+          align_items: flex_end
+          gap: 24
+          tabs:
+            - id: tab_musical
+              label: "Musical"
+              state: active
+              active_text: "#FFFFFF"
+              active_indicator: "#0A84FF"
+              inactive_text: "#8E8E93"
+              font_size: 13
+              font_weight: 500
+              indicator_height: 2
+            - id: tab_practical
+              label: "Practical"
+              state: inactive
+            - id: tab_educational
+              label: "Educational"
+              state: inactive
+
+        - id: summary_content
+          type: text_area
+          flex: 1
+          padding: "12px 20px"
+          background: "#1A1A1A"
+          content:
+            musical: >
+              Adds warmth and body in the low-mids around 200–400Hz. Gentle air
+              boost above 8kHz. Clean and transparent through the midrange with
+              negligible coloration from 500Hz to 5kHz.
+            practical: >
+              This plugin adds approximately +1.5dB of low-mid energy that will
+              thicken instrument bodies in a mix. The high-frequency lift above
+              8kHz adds presence and sheen. Safe for use on buses without build-up
+              concerns due to the flat midrange behavior.
+            educational: >
+              The low-mid shelf boost is centered near 300Hz with a Q of ~0.7,
+              creating a smooth, bell-like slope. The high-frequency shelf uses
+              a 1st-order filter topology, which accounts for the gentle, gradual
+              roll-in. Phase response shows minimal shift — indicates linear-phase
+              processing in the high band.
+          font_size: 13
+          line_height: 1.6
+          color: "#FFFFFF"
+          secondary_color: "#8E8E93"
+
+# --- STYLING ---
+styling:
+  colors:
+    background: "#121212"
+    panel_bg: "#1A1A1A"
+    accent_primary: "#0A84FF"
+    text_primary: "#FFFFFF"
+    text_secondary: "#8E8E93"
+    divider: "#2C2C2E"
+    graph_bg: "#0D0D0D"
+    graph_grid: "#2C2C2E"
+    curve_primary: "#0A84FF"
+    curve_comparison: "#FF9F0A"
+    success: "#30D158"
+    warning: "#FF9F0A"
+    live_indicator: "#30D158"
+
+  fonts:
+    primary: "Inter, system-ui, -apple-system, sans-serif"
+    monospace: "SF Mono, JetBrains Mono, Menlo, monospace"
+    base_size: 13
+    label_size: 10
+    heading_size: 16
+
+  borders:
+    radius_small: 6
+    radius_medium: 8
+    radius_pill: 20
+    panel_border: "1px solid #2C2C2E"
+
+  shadows:
+    graph_inset: "inset 0 2px 8px rgba(0,0,0,0.5)"
+    panel_shadow: "none"
+
+# FINALIZED: true
+finalized: true

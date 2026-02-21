@@ -29,19 +29,20 @@ target_include_directories(PluginScope
         Source
 )
 
-# WebView UI Resources — uncommented by gui-agent in Stage 3 (GUI)
-# juce_add_binary_data(PluginScope_UIResources
-#     HEADER_NAME "BinaryData.h"
-#     NAMESPACE   "BinaryData"
-#     SOURCES
-#         Source/ui/public/index.html
-#         Source/ui/public/js/juce/index.js
-# )
+# WebView UI Resources — Phase 4.1 GUI integration
+juce_add_binary_data(PluginScope_UIResources
+    HEADER_NAME "BinaryData.h"
+    NAMESPACE   "BinaryData"
+    SOURCES
+        Source/ui/public/index.html
+        Source/ui/public/js/juce/index.js
+        Source/ui/public/js/juce/check_native_interop.js
+)
 
 # Required JUCE modules
 target_link_libraries(PluginScope
     PRIVATE
-        # PluginScope_UIResources  # Uncommented by gui-agent in Stage 3 (GUI)
+        PluginScope_UIResources  # Phase 4.1 GUI integration
         juce::juce_audio_basics
         juce::juce_audio_devices
         juce::juce_audio_formats

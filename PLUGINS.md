@@ -41,7 +41,7 @@
 | Words | 💡 Ideated | - | Utility (MIDI Sequencer) | 2025-11-13 |
 | PadForge | 💡 Ideated | - | Synth (Instrument) | 2025-11-14 |
 | AngelGrain | 📦 Installed | 1.0.0 | Audio Effect (Granular Delay) | 2025-11-19 |
-| PluginScope | 🚧 Stage 1 | - | Utility (Plugin Analyzer) | 2026-02-19 |
+| PluginScope | 🚧 Stage 3 | - | Utility (Plugin Analyzer) | 2026-02-20 |
 
 **For detailed plugin information (lifecycle timeline, known issues, parameters, etc.), see:**
 `plugins/[PluginName]/NOTES.md`

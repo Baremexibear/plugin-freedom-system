@@ -1,0 +1,1441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PluginScope UI Mockup v1</title>
+
+  <style>
+    /* ============================================================
+       RESET + WEBVIEW CONSTRAINTS
+       html/body height:100% is REQUIRED — no viewport units
+    ============================================================ */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      height: 100%;
+      width: 100%;
+      overflow: hidden;
+    }
+
+    body {
+      user-select: none;
+      -webkit-user-select: none;
+      cursor: default;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #121212;
+      color: #ffffff;
+      font-size: 13px;
+      line-height: 1;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ============================================================
+       DESIGN TOKENS
+    ============================================================ */
+    :root {
+      --bg:            #121212;
+      --panel-bg:      #1A1A1A;
+      --graph-bg:      #0D0D0D;
+      --border:        #2C2C2E;
+      --accent:        #0A84FF;
+      --accent-hover:  #3399FF;
+      --text:          #FFFFFF;
+      --text-muted:    #8E8E93;
+      --green:         #30D158;
+      --amber:         #FF9F0A;
+      --pill-inactive: #2C2C2E;
+    }
+
+    /* ============================================================
+       ROOT LAYOUT — 3 rows: toolbar | content | summary
+    ============================================================ */
+    #app {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      height: 100%;
+      min-width: 900px;
+      min-height: 520px;
+    }
+
+    /* ============================================================
+       TOOLBAR
+    ============================================================ */
+    #toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      height: 52px;
+      min-height: 52px;
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 0 20px;
+      flex-shrink: 0;
+    }
+
+    .logo {
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--accent);
+      letter-spacing: -0.3px;
+      white-space: nowrap;
+      margin-right: 4px;
+    }
+
+    .toolbar-divider {
+      width: 1px;
+      height: 24px;
+      background: var(--border);
+      flex-shrink: 0;
+      margin: 0 4px;
+    }
+
+    .toolbar-spacer {
+      flex: 1;
+    }
+
+    /* Pill Toggle */
+    .pill-toggle {
+      display: flex;
+      background: var(--pill-inactive);
+      border-radius: 20px;
+      padding: 3px;
+      gap: 2px;
+      flex-shrink: 0;
+    }
+
+    .pill-toggle button {
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 500;
+      padding: 4px 12px;
+      border-radius: 16px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      font-family: inherit;
+      white-space: nowrap;
+    }
+
+    .pill-toggle button.active {
+      color: #ffffff;
+    }
+
+    .pill-toggle button.active.blue  { background: var(--accent); }
+    .pill-toggle button.active.green { background: var(--green); }
+    .pill-toggle button.active.amber { background: var(--amber); }
+
+    /* Compact dropdown */
+    .toolbar-select-wrap {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      background: var(--pill-inactive);
+      border-radius: 8px;
+      padding: 4px 8px;
+      flex-shrink: 0;
+    }
+
+    .toolbar-select-wrap label {
+      font-size: 10px;
+      color: var(--text-muted);
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .toolbar-select-wrap select {
+      background: transparent;
+      border: none;
+      color: #ffffff;
+      font-size: 12px;
+      font-family: inherit;
+      cursor: pointer;
+      outline: none;
+      appearance: none;
+      -webkit-appearance: none;
+      padding-right: 14px;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238E8E93' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 0px center;
+    }
+
+    .toolbar-select-wrap select option {
+      background: #2a2a2a;
+      color: #fff;
+    }
+
+    /* Analyze button */
+    #btn-analyze {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--accent);
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      padding: 7px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    #btn-analyze:hover { background: var(--accent-hover); }
+
+    #btn-analyze .play-icon {
+      font-size: 10px;
+      line-height: 1;
+    }
+
+    /* Export button */
+    #btn-export {
+      width: 32px;
+      height: 32px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: border-color 0.15s, color 0.15s;
+      flex-shrink: 0;
+    }
+
+    #btn-export:hover {
+      border-color: var(--text-muted);
+      color: #ffffff;
+    }
+
+    #btn-export svg {
+      width: 14px;
+      height: 14px;
+    }
+
+    /* Live dot indicator */
+    .live-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 0 2px rgba(48, 209, 88, 0.25);
+      animation: pulse 2s ease-in-out infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 2px rgba(48, 209, 88, 0.25); }
+      50%       { box-shadow: 0 0 0 5px rgba(48, 209, 88, 0.0); }
+    }
+
+    /* ============================================================
+       CONTENT ROW — left panel + right panel
+    ============================================================ */
+    #content-row {
+      display: flex;
+      flex-direction: row;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* ============================================================
+       LEFT PANEL — Hosted Plugin
+    ============================================================ */
+    #plugin-panel {
+      width: 32%;
+      min-width: 240px;
+      max-width: 400px;
+      background: var(--panel-bg);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 18px 18px 16px;
+      flex-shrink: 0;
+    }
+
+    .section-label {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 1.2px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .plugin-name {
+      font-size: 15px;
+      font-weight: 500;
+      color: #ffffff;
+      opacity: 0.3;
+      margin-bottom: 8px;
+      letter-spacing: -0.1px;
+    }
+
+    .format-badges {
+      display: flex;
+      gap: 5px;
+      margin-bottom: 16px;
+    }
+
+    .badge {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-muted);
+      background: #252527;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 2px 7px;
+      letter-spacing: 0.3px;
+    }
+
+    .plugin-ui-placeholder {
+      flex: 1;
+      background: #0A0A0A;
+      border: 1px dashed #2C2C2E;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 16px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .plugin-ui-placeholder::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background:
+        repeating-linear-gradient(
+          45deg,
+          transparent,
+          transparent 20px,
+          rgba(44,44,46,0.15) 20px,
+          rgba(44,44,46,0.15) 21px
+        );
+    }
+
+    .placeholder-icon {
+      width: 32px;
+      height: 32px;
+      opacity: 0.2;
+      position: relative;
+      z-index: 1;
+    }
+
+    .placeholder-text {
+      font-size: 11px;
+      color: #3A3A3C;
+      text-align: center;
+      line-height: 1.5;
+      position: relative;
+      z-index: 1;
+      letter-spacing: 0.1px;
+    }
+
+    #btn-load-plugin {
+      background: transparent;
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 500;
+      font-family: inherit;
+      cursor: pointer;
+      width: 100%;
+      transition: background 0.15s;
+      flex-shrink: 0;
+    }
+
+    #btn-load-plugin:hover {
+      background: rgba(10, 132, 255, 0.1);
+    }
+
+    /* ============================================================
+       RIGHT PANEL — Analysis
+    ============================================================ */
+    #analysis-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg);
+      overflow: hidden;
+    }
+
+    /* Analysis type tabs bar */
+    #analysis-tabs-bar {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      height: 52px;
+      min-height: 52px;
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 0 20px;
+      flex-shrink: 0;
+    }
+
+    .analysis-tab {
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 500;
+      padding: 5px 13px;
+      border-radius: 20px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+
+    .analysis-tab.active {
+      background: var(--accent);
+      color: #ffffff;
+    }
+
+    .analysis-tab:not(.active):hover {
+      background: rgba(255,255,255,0.06);
+      color: #c0c0c3;
+    }
+
+    .tab-spacer {
+      flex: 1;
+    }
+
+    .graph-meta {
+      font-size: 10px;
+      color: var(--text-muted);
+      letter-spacing: 0.3px;
+    }
+
+    /* Graph canvas area */
+    #graph-area {
+      flex: 1;
+      position: relative;
+      background: var(--graph-bg);
+      overflow: hidden;
+    }
+
+    /* Y-axis labels */
+    #y-axis-labels {
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 24px;
+      width: 46px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 12px 0 0 0;
+      z-index: 2;
+      pointer-events: none;
+    }
+
+    .y-label {
+      font-size: 9px;
+      color: var(--text-muted);
+      text-align: right;
+      padding-right: 8px;
+      font-variant-numeric: tabular-nums;
+      font-family: SF Mono, JetBrains Mono, Menlo, monospace;
+      opacity: 0.7;
+    }
+
+    /* X-axis labels */
+    #x-axis-labels {
+      position: absolute;
+      left: 46px;
+      right: 12px;
+      bottom: 0;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      z-index: 2;
+      pointer-events: none;
+    }
+
+    .x-label {
+      font-size: 9px;
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+      font-family: SF Mono, JetBrains Mono, Menlo, monospace;
+      opacity: 0.7;
+    }
+
+    /* Frequency zone tints */
+    #freq-zones {
+      position: absolute;
+      left: 46px;
+      right: 0;
+      top: 0;
+      bottom: 24px;
+      display: flex;
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    .freq-zone-low  { flex: 1.4; background: rgba(255, 159, 10, 0.04); }
+    .freq-zone-mid  { flex: 3.0; background: transparent; }
+    .freq-zone-high { flex: 2.0; background: rgba(10, 132, 255, 0.04); }
+
+    /* Zone labels */
+    .freq-zone-label {
+      position: absolute;
+      bottom: 28px;
+      font-size: 9px;
+      color: var(--text-muted);
+      opacity: 0.45;
+      font-weight: 500;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    #graph-canvas {
+      position: absolute;
+      left: 46px;
+      right: 0;
+      top: 0;
+      bottom: 24px;
+      z-index: 3;
+    }
+
+    /* Comparison curve color legend */
+    #comparison-legend {
+      position: absolute;
+      top: 12px;
+      right: 16px;
+      display: flex;
+      gap: 14px;
+      z-index: 5;
+      align-items: center;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+
+    .legend-swatch {
+      width: 18px;
+      height: 2px;
+      border-radius: 1px;
+    }
+
+    /* ============================================================
+       BOTTOM PANEL — Summary
+    ============================================================ */
+    #summary-panel {
+      height: 148px;
+      min-height: 148px;
+      background: var(--panel-bg);
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+
+    #summary-tab-strip {
+      display: flex;
+      align-items: flex-end;
+      gap: 0;
+      height: 36px;
+      border-bottom: 1px solid var(--border);
+      padding: 0 20px;
+      flex-shrink: 0;
+    }
+
+    .summary-tab {
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 13px;
+      font-weight: 500;
+      font-family: inherit;
+      padding: 0 0 9px 0;
+      margin-right: 22px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+
+    .summary-tab.active {
+      color: #ffffff;
+      border-bottom-color: var(--accent);
+    }
+
+    .summary-tab:not(.active):hover {
+      color: #c0c0c3;
+    }
+
+    #summary-content {
+      flex: 1;
+      padding: 11px 20px 12px;
+      overflow: hidden;
+    }
+
+    .summary-text {
+      font-size: 13px;
+      line-height: 1.6;
+      color: #e0e0e2;
+      display: none;
+    }
+
+    .summary-text.active {
+      display: block;
+    }
+
+    .summary-text strong {
+      color: #ffffff;
+    }
+
+    /* ============================================================
+       UTILITY
+    ============================================================ */
+    .hidden { display: none !important; }
+
+    /* Comparison badge overlay in toolbar */
+    .comparison-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .badge-a { background: var(--accent); color: #fff; }
+    .badge-b { background: var(--amber); color: #fff; }
+
+    #ab-badges {
+      display: none;
+      align-items: center;
+      gap: 3px;
+    }
+    #ab-badges.visible { display: flex; }
+
+  </style>
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ================================================================
+       TOOLBAR
+  ================================================================ -->
+  <div id="toolbar">
+
+    <!-- Logo -->
+    <span class="logo">PluginScope</span>
+    <div class="toolbar-divider"></div>
+
+    <!-- View Mode toggle -->
+    <div class="pill-toggle" id="view-mode-toggle" role="group" aria-label="View Mode">
+      <button class="active blue" data-value="Simplified" onclick="setViewMode('Simplified', this)">Simplified</button>
+      <button data-value="Expert" onclick="setViewMode('Expert', this)">Expert</button>
+    </div>
+
+    <!-- Analysis Mode toggle -->
+    <div class="pill-toggle" id="analysis-mode-toggle" role="group" aria-label="Analysis Mode">
+      <button class="active green" data-value="Live" onclick="setAnalysisMode('Live', this)">
+        Live
+      </button>
+      <button data-value="Snapshot" onclick="setAnalysisMode('Snapshot', this)">Snapshot</button>
+    </div>
+
+    <!-- Live indicator dot (shows when Live is active) -->
+    <div class="live-dot" id="live-dot" title="Live analysis running"></div>
+
+    <div class="toolbar-divider"></div>
+
+    <!-- Test Signal -->
+    <div class="toolbar-select-wrap">
+      <label>Signal</label>
+      <select id="test-signal-select" onchange="onTestSignalChange(this.value)">
+        <option value="sine_sweep">Sine Sweep</option>
+        <option value="white_noise">White Noise</option>
+        <option value="pink_noise">Pink Noise</option>
+        <option value="impulse">Impulse</option>
+        <option value="live_audio">Live Audio</option>
+      </select>
+    </div>
+
+    <div class="toolbar-spacer"></div>
+
+    <!-- A/B Comparison badges (shown when comparison active) -->
+    <div id="ab-badges">
+      <span class="comparison-badge badge-a">A</span>
+      <span class="comparison-badge badge-b">B</span>
+    </div>
+
+    <!-- Comparison -->
+    <div class="toolbar-select-wrap">
+      <label>Compare</label>
+      <select id="comparison-select" onchange="onComparisonChange(this.value)">
+        <option value="off">Off</option>
+        <option value="ab_plugins">A/B Plugins</option>
+        <option value="before_after">Before-After</option>
+      </select>
+    </div>
+
+    <!-- Analyze button -->
+    <button id="btn-analyze" onclick="onAnalyze()">
+      <span class="play-icon">&#9654;</span> Analyze
+    </button>
+
+    <!-- Export button -->
+    <button id="btn-export" title="Export results" onclick="onExport()">
+      <svg viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M7 1v8M4 6l3 3 3-3M2 11h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+
+  </div><!-- /toolbar -->
+
+  <!-- ================================================================
+       CONTENT ROW
+  ================================================================ -->
+  <div id="content-row">
+
+    <!-- ============================================================
+         LEFT PANEL — Hosted Plugin
+    ============================================================ -->
+    <div id="plugin-panel">
+
+      <div class="section-label">Loaded Plugin</div>
+      <div class="plugin-name" id="plugin-name-display">No plugin loaded</div>
+
+      <div class="format-badges">
+        <span class="badge">VST3</span>
+        <span class="badge">AU</span>
+        <span class="badge">VST2</span>
+      </div>
+
+      <div class="plugin-ui-placeholder">
+        <svg class="placeholder-icon" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="2" y="8" width="28" height="18" rx="3" stroke="#8E8E93" stroke-width="1.5"/>
+          <circle cx="10" cy="17" r="4" stroke="#8E8E93" stroke-width="1.5"/>
+          <line x1="18" y1="13" x2="28" y2="13" stroke="#8E8E93" stroke-width="1.5" stroke-linecap="round"/>
+          <line x1="18" y1="17" x2="28" y2="17" stroke="#8E8E93" stroke-width="1.5" stroke-linecap="round"/>
+          <line x1="18" y1="21" x2="24" y2="21" stroke="#8E8E93" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <span class="placeholder-text">Plugin UI renders here</span>
+      </div>
+
+      <button id="btn-load-plugin" onclick="onLoadPlugin()">Load Plugin&hellip;</button>
+
+    </div><!-- /plugin-panel -->
+
+    <!-- ============================================================
+         RIGHT PANEL — Analysis Graph
+    ============================================================ -->
+    <div id="analysis-panel">
+
+      <!-- Analysis type tab bar -->
+      <div id="analysis-tabs-bar">
+        <button class="analysis-tab active" data-tab="frequency" onclick="switchAnalysisTab('frequency', this)">Frequency</button>
+        <button class="analysis-tab" data-tab="dynamics"  onclick="switchAnalysisTab('dynamics', this)">Dynamics</button>
+        <button class="analysis-tab" data-tab="distortion" onclick="switchAnalysisTab('distortion', this)">Distortion</button>
+        <button class="analysis-tab" data-tab="phase"     onclick="switchAnalysisTab('phase', this)">Phase</button>
+        <button class="analysis-tab" data-tab="latency"   onclick="switchAnalysisTab('latency', this)">Latency</button>
+        <div class="tab-spacer"></div>
+        <span class="graph-meta" id="graph-meta-label">20 Hz – 20 kHz &nbsp;·&nbsp; ±18 dB</span>
+      </div>
+
+      <!-- Graph canvas area -->
+      <div id="graph-area">
+
+        <!-- Frequency zone tints (simplified mode) -->
+        <div id="freq-zones">
+          <div class="freq-zone-low"></div>
+          <div class="freq-zone-mid"></div>
+          <div class="freq-zone-high"></div>
+        </div>
+
+        <!-- Zone labels (simplified mode) -->
+        <span class="freq-zone-label" id="zone-low"  style="left:52px">Low</span>
+        <span class="freq-zone-label" id="zone-mid"  style="left:calc(46px + 18%)">Mid</span>
+        <span class="freq-zone-label" id="zone-high" style="right:60px">High</span>
+
+        <!-- Y-axis labels -->
+        <div id="y-axis-labels">
+          <span class="y-label">+18</span>
+          <span class="y-label">+12</span>
+          <span class="y-label">+6</span>
+          <span class="y-label">&ensp;0</span>
+          <span class="y-label">−6</span>
+          <span class="y-label">−12</span>
+          <span class="y-label">−18</span>
+        </div>
+
+        <!-- X-axis labels -->
+        <div id="x-axis-labels">
+          <span class="x-label">20</span>
+          <span class="x-label">100</span>
+          <span class="x-label">200</span>
+          <span class="x-label">500</span>
+          <span class="x-label">1k</span>
+          <span class="x-label">2k</span>
+          <span class="x-label">5k</span>
+          <span class="x-label">10k</span>
+          <span class="x-label">20k</span>
+        </div>
+
+        <!-- Comparison legend (visible when comparison on) -->
+        <div id="comparison-legend" class="hidden">
+          <div class="legend-item">
+            <div class="legend-swatch" style="background:#0A84FF"></div>
+            <span>Plugin A</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-swatch" style="background:#FF9F0A"></div>
+            <span>Plugin B</span>
+          </div>
+        </div>
+
+        <!-- Main graph canvas -->
+        <canvas id="graph-canvas"></canvas>
+
+      </div><!-- /graph-area -->
+
+    </div><!-- /analysis-panel -->
+
+  </div><!-- /content-row -->
+
+  <!-- ================================================================
+       BOTTOM PANEL — Plain-English Summary
+  ================================================================ -->
+  <div id="summary-panel">
+
+    <div id="summary-tab-strip">
+      <button class="summary-tab active" data-tab="musical"     onclick="switchSummaryTab('musical', this)">Musical</button>
+      <button class="summary-tab"        data-tab="practical"   onclick="switchSummaryTab('practical', this)">Practical</button>
+      <button class="summary-tab"        data-tab="educational" onclick="switchSummaryTab('educational', this)">Educational</button>
+    </div>
+
+    <div id="summary-content">
+
+      <div class="summary-text active" id="summary-musical">
+        Adds warmth and body in the low-mids around 200–400&thinsp;Hz. Gentle air boost above 8&thinsp;kHz.
+        Clean and transparent through the midrange with negligible coloration from 500&thinsp;Hz to 5&thinsp;kHz.
+      </div>
+
+      <div class="summary-text" id="summary-practical">
+        Approximately <strong>+1.5&thinsp;dB</strong> of low-mid energy thickens instrument bodies in a mix.
+        The high-frequency lift above 8&thinsp;kHz adds presence and sheen. Safe for use on buses
+        — the flat midrange prevents low-mid buildup on stacked tracks.
+      </div>
+
+      <div class="summary-text" id="summary-educational">
+        The low-mid shelf is centered near 300&thinsp;Hz with a Q of ~0.7, producing a smooth bell-like
+        slope. The high-frequency shelf uses a 1st-order filter topology, explaining the gradual
+        roll-in. Phase response shows minimal shift — consistent with linear-phase processing
+        in the high band. THD: &lt;0.01% at 0&thinsp;dBFS.
+      </div>
+
+    </div>
+
+  </div><!-- /summary-panel -->
+
+</div><!-- /app -->
+
+
+<script>
+  /* ================================================================
+     MOCK JUCE BACKEND
+  ================================================================ */
+  window.Juce = {
+    getComboBoxState: function(id) {
+      return {
+        selectedId: 0,
+        valueChangedEvent: {
+          addListener: function(fn) {
+            console.log('[Juce] Listener registered for combo:', id);
+          }
+        },
+        setSelectedId: function(id) {
+          console.log('[Juce] setSelectedId', id);
+        }
+      };
+    },
+    getToggleState: function(id) {
+      return {
+        value: false,
+        valueChangedEvent: {
+          addListener: function(fn) {
+            console.log('[Juce] Listener registered for toggle:', id);
+          }
+        }
+      };
+    }
+  };
+
+  // Disable context menu (REQUIRED for WebView)
+  document.addEventListener('contextmenu', function(e) {
+    e.preventDefault();
+    return false;
+  });
+
+  /* ================================================================
+     PLUGIN STATE
+  ================================================================ */
+  var state = {
+    viewMode:     'Simplified',  // Simplified | Expert
+    analysisMode: 'Live',        // Live | Snapshot
+    analysisType: 'frequency',   // frequency | dynamics | distortion | phase | latency
+    testSignal:   'sine_sweep',
+    comparison:   'off',
+    summaryTab:   'musical'
+  };
+
+  /* ================================================================
+     PARAMETER CONTROLS
+  ================================================================ */
+  function setViewMode(value, btn) {
+    state.viewMode = value;
+    // Update pill buttons
+    var btns = document.querySelectorAll('#view-mode-toggle button');
+    btns.forEach(function(b) {
+      b.classList.remove('active', 'blue');
+    });
+    btn.classList.add('active', 'blue');
+    applyViewMode();
+    console.log('[param] view_mode =', value);
+  }
+
+  function setAnalysisMode(value, btn) {
+    state.analysisMode = value;
+    var btns = document.querySelectorAll('#analysis-mode-toggle button');
+    btns.forEach(function(b) {
+      b.classList.remove('active', 'green', 'amber');
+    });
+    if (value === 'Live') {
+      btn.classList.add('active', 'green');
+    } else {
+      btn.classList.add('active', 'amber');
+    }
+    // Show/hide live dot
+    document.getElementById('live-dot').style.display = value === 'Live' ? 'block' : 'none';
+    console.log('[param] analysis_mode =', value);
+  }
+
+  function onTestSignalChange(value) {
+    state.testSignal = value;
+    console.log('[param] test_signal =', value);
+  }
+
+  function onComparisonChange(value) {
+    state.comparison = value;
+    var abBadges = document.getElementById('ab-badges');
+    var legend = document.getElementById('comparison-legend');
+    if (value !== 'off') {
+      abBadges.classList.add('visible');
+      legend.classList.remove('hidden');
+      // Redraw with comparison curve
+      drawGraph(state.analysisType, true);
+    } else {
+      abBadges.classList.remove('visible');
+      legend.classList.add('hidden');
+      drawGraph(state.analysisType, false);
+    }
+    console.log('[param] comparison =', value);
+  }
+
+  /* ================================================================
+     ANALYSIS TYPE TABS
+  ================================================================ */
+  var graphMeta = {
+    frequency:  '20 Hz – 20 kHz \u00B7 \u00B118 dB',
+    dynamics:   '\u221260 dBFS – 0 dBFS \u00B7 Gain Reduction',
+    distortion: '20 Hz – 20 kHz \u00B7 THD+N',
+    phase:      '20 Hz – 20 kHz \u00B7 Phase (deg)',
+    latency:    'Sample offset \u00B7 ms'
+  };
+
+  function switchAnalysisTab(tab, btn) {
+    state.analysisType = tab;
+    // Update tab buttons
+    document.querySelectorAll('.analysis-tab').forEach(function(b) {
+      b.classList.remove('active');
+    });
+    btn.classList.add('active');
+    // Update meta label
+    document.getElementById('graph-meta-label').textContent = graphMeta[tab] || '';
+    // Show/hide freq zone elements
+    var isFreq = (tab === 'frequency');
+    document.getElementById('freq-zones').style.display = isFreq ? 'flex' : 'none';
+    document.getElementById('zone-low').style.display  = (isFreq && state.viewMode === 'Simplified') ? 'block' : 'none';
+    document.getElementById('zone-mid').style.display  = (isFreq && state.viewMode === 'Simplified') ? 'block' : 'none';
+    document.getElementById('zone-high').style.display = (isFreq && state.viewMode === 'Simplified') ? 'block' : 'none';
+    // Update axis labels
+    updateAxisLabels(tab);
+    // Redraw
+    drawGraph(tab, state.comparison !== 'off');
+    console.log('[param] analysis_type =', tab);
+  }
+
+  function updateAxisLabels(tab) {
+    var xEl = document.getElementById('x-axis-labels');
+    var yEl = document.getElementById('y-axis-labels');
+    var xLabels, yLabels;
+
+    if (tab === 'frequency' || tab === 'distortion' || tab === 'phase') {
+      xLabels = ['20', '100', '200', '500', '1k', '2k', '5k', '10k', '20k'];
+    } else if (tab === 'dynamics') {
+      xLabels = ['\u221260', '\u221248', '\u221236', '\u221224', '\u221212', '0'];
+    } else {
+      xLabels = ['0', '64', '128', '256', '512', '1024'];
+    }
+
+    if (tab === 'phase') {
+      yLabels = ['+180\u00B0', '+90\u00B0', '0\u00B0', '\u221290\u00B0', '\u2212180\u00B0'];
+    } else if (tab === 'dynamics') {
+      yLabels = ['0', '\u22126', '\u221212', '\u221218', '\u221224', '\u221230'];
+    } else if (tab === 'latency') {
+      yLabels = ['20ms', '15ms', '10ms', '5ms', '0ms'];
+    } else {
+      if (state.viewMode === 'Expert') {
+        yLabels = ['+18', '+12', '+6', '0', '\u22126', '\u221212', '\u221218'];
+      } else {
+        yLabels = ['', '', '', '', '', '', ''];
+      }
+    }
+
+    xEl.innerHTML = xLabels.map(function(l) {
+      return '<span class="x-label">' + l + '</span>';
+    }).join('');
+
+    yEl.innerHTML = yLabels.map(function(l) {
+      return '<span class="y-label">' + l + '</span>';
+    }).join('');
+  }
+
+  /* ================================================================
+     SUMMARY TABS
+  ================================================================ */
+  function switchSummaryTab(tab, btn) {
+    state.summaryTab = tab;
+    document.querySelectorAll('.summary-tab').forEach(function(b) {
+      b.classList.remove('active');
+    });
+    btn.classList.add('active');
+    document.querySelectorAll('.summary-text').forEach(function(el) {
+      el.classList.remove('active');
+    });
+    document.getElementById('summary-' + tab).classList.add('active');
+    console.log('[ui] summary tab =', tab);
+  }
+
+  /* ================================================================
+     VIEW MODE APPLY
+  ================================================================ */
+  function applyViewMode() {
+    var simplified = state.viewMode === 'Simplified';
+    var isFreq = state.analysisType === 'frequency';
+    // Zone labels: only in simplified + frequency view
+    ['zone-low','zone-mid','zone-high'].forEach(function(id) {
+      document.getElementById(id).style.display = (simplified && isFreq) ? 'block' : 'none';
+    });
+    // y-axis label verbosity
+    updateAxisLabels(state.analysisType);
+    // Summary panel: visible in simplified, hidden in expert
+    document.getElementById('summary-panel').style.display = simplified ? '' : 'none';
+    drawGraph(state.analysisType, state.comparison !== 'off');
+  }
+
+  /* ================================================================
+     GRAPH RENDERING
+  ================================================================ */
+  var canvas  = document.getElementById('graph-canvas');
+  var ctx     = canvas.getContext('2d');
+
+  function resizeCanvas() {
+    var area = document.getElementById('graph-area');
+    var rect = area.getBoundingClientRect();
+    // Left offset is 46px for y-axis, bottom 24px for x-axis
+    canvas.width  = rect.width  - 46;
+    canvas.height = rect.height - 24;
+    drawGraph(state.analysisType, state.comparison !== 'off');
+  }
+
+  function drawGraph(type, showComparison) {
+    var W = canvas.width;
+    var H = canvas.height;
+    if (W === 0 || H === 0) return;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // Grid
+    drawGrid(W, H, type);
+
+    // Primary curve
+    if (type === 'frequency') {
+      drawFrequencyCurve(W, H, '#0A84FF', 'rgba(10,132,255,0.28)', 'rgba(10,132,255,0.0)', false);
+      if (showComparison) {
+        drawFrequencyCurveB(W, H, '#FF9F0A', 'rgba(255,159,10,0.18)', 'rgba(255,159,10,0.0)');
+      }
+    } else if (type === 'dynamics') {
+      drawDynamicsCurve(W, H, '#0A84FF', false);
+      if (showComparison) drawDynamicsCurve(W, H, '#FF9F0A', true);
+    } else if (type === 'distortion') {
+      drawDistortionBars(W, H);
+    } else if (type === 'phase') {
+      drawPhaseCurve(W, H, '#0A84FF');
+      if (showComparison) drawPhaseCurve(W, H, '#FF9F0A', true);
+    } else if (type === 'latency') {
+      drawLatencyBar(W, H);
+    }
+  }
+
+  function drawGrid(W, H, type) {
+    ctx.strokeStyle = '#2C2C2E';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+
+    // Horizontal grid lines
+    var hLines = 7;
+    for (var i = 0; i < hLines; i++) {
+      var y = Math.round(H * i / (hLines - 1)) + 0.5;
+      // Zero line slightly brighter
+      if (i === 3) {
+        ctx.strokeStyle = '#3C3C3E';
+        ctx.lineWidth = 1;
+      } else {
+        ctx.strokeStyle = '#2C2C2E';
+        ctx.lineWidth = 1;
+      }
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+    }
+
+    ctx.strokeStyle = '#2C2C2E';
+    ctx.lineWidth = 1;
+
+    // Vertical grid lines (frequency positions, log scale)
+    if (type === 'frequency' || type === 'distortion' || type === 'phase') {
+      var freqs = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+      freqs.forEach(function(f) {
+        var x = Math.round(freqToX(f, W)) + 0.5;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, H);
+        ctx.stroke();
+      });
+    } else {
+      // Linear vertical lines
+      var vLines = 6;
+      for (var v = 0; v <= vLines; v++) {
+        var vx = Math.round(W * v / vLines) + 0.5;
+        ctx.beginPath();
+        ctx.moveTo(vx, 0);
+        ctx.lineTo(vx, H);
+        ctx.stroke();
+      }
+    }
+  }
+
+  // Map frequency (Hz) to X in log scale
+  function freqToX(f, W) {
+    var minF = Math.log10(20);
+    var maxF = Math.log10(20000);
+    return (Math.log10(f) - minF) / (maxF - minF) * W;
+  }
+
+  // Map dB to Y (range -18 to +18)
+  function dbToY(db, H) {
+    // +18 at top, -18 at bottom
+    return H * (1 - (db + 18) / 36);
+  }
+
+  /* Frequency Response: slight high-shelf boost + low warmth */
+  function drawFrequencyCurve(W, H, lineColor, fillTop, fillBottom, offset) {
+    // Generate points across log frequency range
+    var points = [];
+    var steps = 300;
+    for (var i = 0; i <= steps; i++) {
+      var t = i / steps;
+      var logF = 1.301 + t * 2.699;  // log10(20) to log10(20000) ~ 1.301..4.301 but scaled
+      var f = Math.pow(10, 1.301 + t * 2.999);
+      var x = t * W;
+      var db = shelfCurve(f);
+      if (offset) db += 1.2;
+      var y = dbToY(db, H);
+      points.push([x, y]);
+    }
+    drawCurveWithFill(points, lineColor, fillTop, fillBottom, W, H);
+  }
+
+  /* Comparison curve (slightly different shelf character) */
+  function drawFrequencyCurveB(W, H, lineColor, fillTop, fillBottom) {
+    var points = [];
+    var steps = 300;
+    for (var i = 0; i <= steps; i++) {
+      var t = i / steps;
+      var f = Math.pow(10, 1.301 + t * 2.999);
+      var x = t * W;
+      var db = shelfCurveB(f);
+      var y = dbToY(db, H);
+      points.push([x, y]);
+    }
+    ctx.globalAlpha = 0.85;
+    drawCurveWithFill(points, lineColor, fillTop, fillBottom, W, H);
+    ctx.globalAlpha = 1;
+  }
+
+  // High-shelf boost + low-mid warmth shape
+  function shelfCurve(f) {
+    // Low-mid warmth: bell near 280Hz
+    var bellLow = 1.5 * Math.exp(-Math.pow(Math.log(f / 280) / 0.8, 2));
+    // High shelf above 7kHz: +2dB
+    var highShelf = 2.0 / (1 + Math.exp(-0.003 * (f - 5000)));
+    // Tiny dip around 1.5kHz for realism
+    var midDip = -0.4 * Math.exp(-Math.pow(Math.log(f / 1500) / 0.5, 2));
+    return bellLow + highShelf + midDip;
+  }
+
+  // Comparison plugin: flatter low-mid, stronger high-shelf
+  function shelfCurveB(f) {
+    var bellLow = 0.5 * Math.exp(-Math.pow(Math.log(f / 350) / 1.1, 2));
+    var highShelf = 3.2 / (1 + Math.exp(-0.004 * (f - 6000)));
+    return bellLow + highShelf;
+  }
+
+  function drawCurveWithFill(points, lineColor, fillTop, fillBottom, W, H) {
+    if (points.length === 0) return;
+
+    // Gradient fill
+    var grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, fillTop);
+    grad.addColorStop(1, fillBottom);
+
+    ctx.beginPath();
+    ctx.moveTo(points[0][0], points[0][1]);
+    for (var i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i][0], points[i][1]);
+    }
+    // Close fill path to bottom
+    ctx.lineTo(W, H);
+    ctx.lineTo(0, H);
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Curve line
+    ctx.beginPath();
+    ctx.moveTo(points[0][0], points[0][1]);
+    for (var j = 1; j < points.length; j++) {
+      ctx.lineTo(points[j][0], points[j][1]);
+    }
+    ctx.strokeStyle = lineColor;
+    ctx.lineWidth = 1.8;
+    ctx.setLineDash([]);
+    ctx.stroke();
+  }
+
+  /* Dynamics Curve: input vs output gain reduction */
+  function drawDynamicsCurve(W, H, color, offset) {
+    var points = [];
+    var steps = 200;
+    for (var i = 0; i <= steps; i++) {
+      var t = i / steps;
+      var inputDb = -60 + t * 60;
+      var outputDb = dynamicsShape(inputDb, offset);
+      var x = t * W;
+      // Map input/output to graph: x=input, y=output (both -60..0)
+      var y = H - (outputDb + 60) / 60 * H;
+      points.push([x, y]);
+    }
+    // Draw 1:1 unity line
+    ctx.strokeStyle = '#3C3C3E';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    ctx.lineTo(W, 0);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.beginPath();
+    ctx.moveTo(points[0][0], points[0][1]);
+    for (var i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i][0], points[i][1]);
+    }
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.8;
+    if (offset) ctx.globalAlpha = 0.7;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  function dynamicsShape(db, offset) {
+    var threshold = offset ? -22 : -18;
+    var ratio = offset ? 6 : 4;
+    if (db < threshold) {
+      return threshold + (db - threshold) / ratio;
+    }
+    return db;
+  }
+
+  /* Distortion bars: harmonic series */
+  function drawDistortionBars(W, H) {
+    var fundamental = 1000;
+    var harmonics = [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000];
+    var amplitudes = [1.0, 0.09, 0.03, 0.015, 0.008, 0.004, 0.003, 0.002];
+    var barW = W * 0.006;
+
+    harmonics.forEach(function(f, idx) {
+      var x = freqToX(f, W);
+      var amp = amplitudes[idx];
+      var barH = amp * H * 0.8;
+      var y = H - barH;
+      var grad = ctx.createLinearGradient(0, y, 0, H);
+      if (idx === 0) {
+        grad.addColorStop(0, '#0A84FF');
+        grad.addColorStop(1, 'rgba(10,132,255,0.3)');
+      } else {
+        grad.addColorStop(0, '#FF9F0A');
+        grad.addColorStop(1, 'rgba(255,159,10,0.2)');
+      }
+      ctx.fillStyle = grad;
+      ctx.fillRect(x - barW / 2, y, barW, barH);
+    });
+  }
+
+  /* Phase curve */
+  function drawPhaseCurve(W, H, color, offset) {
+    var points = [];
+    var steps = 300;
+    for (var i = 0; i <= steps; i++) {
+      var t = i / steps;
+      var f = Math.pow(10, 1.301 + t * 2.999);
+      var x = t * W;
+      // S-curve phase shift typical of minimum-phase filter
+      var phase = phaseCurveShape(f, offset);
+      // Map -180..+180 to height
+      var y = H * (1 - (phase + 180) / 360);
+      points.push([x, y]);
+    }
+    ctx.beginPath();
+    ctx.moveTo(points[0][0], points[0][1]);
+    for (var i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i][0], points[i][1]);
+    }
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.8;
+    if (offset) ctx.globalAlpha = 0.7;
+    ctx.setLineDash([]);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  function phaseCurveShape(f, offset) {
+    var pivot = offset ? 3000 : 5000;
+    var range = offset ? 60 : 35;
+    return range * Math.tanh((f - pivot) / (pivot * 0.6));
+  }
+
+  /* Latency bar chart */
+  function drawLatencyBar(W, H) {
+    var barH = 3;
+    var y = H * 0.3;
+    var barLen = W * 0.18;
+    // Single latency bar
+    var grad = ctx.createLinearGradient(0, 0, barLen, 0);
+    grad.addColorStop(0, '#0A84FF');
+    grad.addColorStop(1, 'rgba(10,132,255,0.5)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, y, barLen, barH);
+
+    // Label
+    ctx.fillStyle = '#8E8E93';
+    ctx.font = '11px Inter, system-ui, sans-serif';
+    ctx.fillText('Reported latency: 256 samples (5.8 ms @ 44.1 kHz)', barLen + 10, y + barH * 0.5 + 4);
+    ctx.fillStyle = '#0A84FF';
+    ctx.font = '10px SF Mono, Menlo, monospace';
+    ctx.fillText('256 smp', barLen + 10, y + barH * 0.5 + 18);
+  }
+
+  /* ================================================================
+     BUTTON HANDLERS
+  ================================================================ */
+  function onAnalyze() {
+    console.log('[action] Analyze triggered — signal:', state.testSignal, '| mode:', state.analysisMode);
+    // Animate a brief redraw to simulate analysis running
+    var btn = document.getElementById('btn-analyze');
+    btn.textContent = 'Running\u2026';
+    btn.style.background = '#30D158';
+    setTimeout(function() {
+      btn.innerHTML = '<span class="play-icon">&#9654;</span> Analyze';
+      btn.style.background = '';
+      drawGraph(state.analysisType, state.comparison !== 'off');
+    }, 800);
+  }
+
+  function onExport() {
+    console.log('[action] Export triggered');
+    alert('Export: PDF / text report would be generated here.');
+  }
+
+  function onLoadPlugin() {
+    console.log('[action] Load Plugin dialog');
+    alert('Load Plugin: System plugin scanner would open here.\nFormats: VST3 / AU / VST2');
+  }
+
+  /* ================================================================
+     RESIZE OBSERVER
+  ================================================================ */
+  var resizeObserver = new ResizeObserver(function() {
+    resizeCanvas();
+  });
+  resizeObserver.observe(document.getElementById('graph-area'));
+
+  /* ================================================================
+     INIT
+  ================================================================ */
+  document.addEventListener('DOMContentLoaded', function() {
+    // Register mock Juce listeners
+    ['view_mode','analysis_mode','analysis_type','test_signal','comparison'].forEach(function(id) {
+      Juce.getComboBoxState(id).valueChangedEvent.addListener(function(v) {
+        console.log('[Juce → UI] ' + id + ' changed to', v);
+      });
+    });
+
+    // Initial draw (after short layout settle)
+    setTimeout(function() {
+      resizeCanvas();
+      updateAxisLabels('frequency');
+    }, 50);
+
+    console.log('[PluginScope] Mockup v1 initialized. State:', JSON.stringify(state));
+  });
+</script>
+
+</body>
+</html>

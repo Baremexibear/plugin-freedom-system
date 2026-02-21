@@ -37,8 +37,7 @@ PluginScopeAudioProcessorEditor::PluginScopeAudioProcessorEditor (PluginScopeAud
                   juce::WebBrowserComponent::Options::WinWebView2{}
                       .withUserDataFolder (juce::File::getSpecialLocation (juce::File::tempDirectory)))
               .withResourceProvider (
-                  [this] (const auto& url) { return getResource (url); },
-                  juce::String {"https://pluginscope.localhost/"})
+                  [this] (const auto& url) { return getResource (url); })
               // Native functions: one per event type emitted by the HTML.
               // The HTML calls window.__JUCE__.backend.emitEvent(eventName, data)
               // which dispatches to the native function registered with that name.
@@ -149,7 +148,7 @@ PluginScopeAudioProcessorEditor::PluginScopeAudioProcessorEditor (PluginScopeAud
     addAndMakeVisible (hostedPluginPanel);
 
     // Navigate to embedded resource root
-    webView->goToURL ("https://pluginscope.localhost/index.html");
+    webView->goToURL (juce::WebBrowserComponent::getResourceProviderRoot());
 
     // Listen for scan progress / completion updates
     processorRef.scanBroadcaster.addChangeListener (this);
@@ -235,11 +234,8 @@ void PluginScopeAudioProcessorEditor::resized()
 std::optional<juce::WebBrowserComponent::Resource>
 PluginScopeAudioProcessorEditor::getResource (const juce::String& url)
 {
-    // Strip query string and leading slash to get the path component
-    auto path = juce::URL (url).getSubPath().trimCharactersAtStart ("/");
-
     // Root or explicit index.html request
-    if (path.isEmpty() || path == "index.html")
+    if (url == "/" || url == "/index.html")
     {
         return juce::WebBrowserComponent::Resource {
             makeByteVector (BinaryData::index_html, BinaryData::index_htmlSize),
@@ -248,7 +244,7 @@ PluginScopeAudioProcessorEditor::getResource (const juce::String& url)
     }
 
     // JUCE WebView JS bridge
-    if (path == "js/juce/index.js")
+    if (url == "/js/juce/index.js")
     {
         return juce::WebBrowserComponent::Resource {
             makeByteVector (BinaryData::index_js, BinaryData::index_jsSize),
@@ -257,7 +253,7 @@ PluginScopeAudioProcessorEditor::getResource (const juce::String& url)
     }
 
     // JUCE native interop check script (Pattern #13 — required for bridge stability)
-    if (path == "js/juce/check_native_interop.js")
+    if (url == "/js/juce/check_native_interop.js")
     {
         return juce::WebBrowserComponent::Resource {
             makeByteVector (BinaryData::check_native_interop_js,

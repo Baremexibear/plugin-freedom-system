@@ -716,6 +716,33 @@ void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&) override 
 
 ---
 
+## 26. No Non-ASCII Characters in juce::String Literals (ALWAYS REQUIRED)
+
+### ❌ WRONG (triggers jassert in juce_String.cpp:327 at runtime)
+```cpp
+// Em dash (U+2014, UTF-8: 0xE2 0x80 0x94) in a string literal passed to juce::String
+juce::Logger::writeToLog ("[PluginScope] analyzeRequested — reset pending");
+juce::Logger::writeToLog ("[PluginScope] loadPlugin FAILED: \"" + name + "\" — " + error);
+csv << "# (no data — run analysis first)\n";
+```
+
+### ✅ CORRECT
+```cpp
+// Use plain ASCII hyphen instead
+juce::Logger::writeToLog ("[PluginScope] analyzeRequested - reset pending");
+juce::Logger::writeToLog ("[PluginScope] loadPlugin FAILED: \"" + name + "\" - " + error);
+csv << "# (no data - run analysis first)\n";
+
+// OR: if you truly need Unicode, use fromUTF8 explicitly
+juce::Logger::writeToLog (juce::String::fromUTF8 ("analyzeRequested \xe2\x80\x94 reset pending"));
+```
+
+**Why:** `juce::String(const char*)` calls `jassert(CharPointer_ASCII::isValidString(t, ...))` — it only accepts bytes <= 127. UTF-8 encoded characters like em dash (—), curly quotes, ellipsis, etc. all contain bytes > 127 and will fire this assertion at runtime even in Release builds. The assertion fires in `juce_String.cpp:327`. Comments in source files are safe (never become runtime strings); only string literals used to construct `juce::String` values are affected.
+
+**Placement/Context:** Any string literal that ends up constructing a `juce::String` — Logger calls, string concatenation with `+`, `<<` on a `juce::String`, `juce::String js = "..."`, return values, etc. Applies everywhere in JUCE plugin code. Particularly sneaky in log messages and export/CSV strings where em dashes look natural in English prose.
+
+---
+
 ## Usage Instructions
 
 ### For Subagents (foundation-agent, shell-agent, dsp-agent, gui-agent)

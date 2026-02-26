@@ -1670,33 +1670,47 @@
     if (latA < 0 && latB < 0) {
       ctx.fillStyle = '#636366';
       ctx.font = '12px Inter, system-ui, sans-serif';
-      ctx.fillText('No latency data — load a plugin and click Analyze', 12, H * 0.35);
+      ctx.fillText('No latency data \u2014 load a plugin and click Analyze', 12, H * 0.35);
       return;
     }
 
+    ctx.font = '11px Inter, system-ui, sans-serif';
     var maxSamples = Math.max(latA, latB, 1);
-    var barH = 4, barY = H * 0.28;
+    var maxBarW = W * 0.78;  // cap bars so text always fits on a new line
+    var barH = 5;
+    var rowH  = 52;           // total height per row: label + bar + measurement text
+    var startY = H * 0.15;
 
-    if (latA >= 0) {
-      var lenA = (latA / maxSamples) * W * 0.65;
-      var gA = ctx.createLinearGradient(0, 0, lenA, 0);
-      gA.addColorStop(0, '#0A84FF'); gA.addColorStop(1, 'rgba(10,132,255,0.45)');
-      ctx.fillStyle = gA; ctx.fillRect(0, barY, lenA, barH);
-      ctx.fillStyle = '#8E8E93'; ctx.font = '11px Inter, system-ui, sans-serif';
-      ctx.fillText('Method A (reported): ' + latA + ' samples (' + msA.toFixed(2) + ' ms)',
-                   lenA + 10, barY + barH + 3);
+    function drawRow(label, samples, ms, barColor, fillColor, rowY) {
+      var labelY = rowY;
+      var barY   = rowY + 16;
+      var measY  = rowY + 16 + barH + 13;
+      // Row label (muted)
+      ctx.fillStyle = '#8E8E93';
+      ctx.fillText(label, 0, labelY);
+      // Bar
+      var len = samples > 0 ? (samples / maxSamples) * maxBarW : 0;
+      if (len > 0) {
+        var g = ctx.createLinearGradient(0, 0, len, 0);
+        g.addColorStop(0, barColor); g.addColorStop(1, fillColor);
+        ctx.fillStyle = g;
+        ctx.fillRect(0, barY, len, barH);
+      }
+      // Measurement text below bar (always full width, never clips)
+      ctx.fillStyle = '#FFFFFF';
+      var measText = samples === 0
+        ? 'Plugin reports no latency  \u00B7  0 samples  \u00B7  0.00 ms'
+        : samples + ' samples  \u00B7  ' + ms.toFixed(2) + ' ms';
+      ctx.fillText(measText, 0, measY);
     }
 
-    if (latB >= 0) {
-      var barYB = barY + 30;
-      var lenB = (latB / maxSamples) * W * 0.65;
-      var gB = ctx.createLinearGradient(0, 0, lenB, 0);
-      gB.addColorStop(0, '#FF9F0A'); gB.addColorStop(1, 'rgba(255,159,10,0.45)');
-      ctx.fillStyle = gB; ctx.fillRect(0, barYB, lenB, barH);
-      ctx.fillStyle = '#8E8E93'; ctx.font = '11px Inter, system-ui, sans-serif';
-      ctx.fillText('Method B (empirical): ' + latB + ' samples (' + msB.toFixed(2) + ' ms)',
-                   lenB + 10, barYB + barH + 3);
-    }
+    if (latA >= 0)
+      drawRow('Method A  (plugin reported via getLatencySamples)',
+              latA, msA, '#0A84FF', 'rgba(10,132,255,0.35)', startY);
+
+    if (latB >= 0)
+      drawRow('Method B  (empirical impulse measurement)',
+              latB, msB, '#FF9F0A', 'rgba(255,159,10,0.35)', startY + rowH);
   }
 
   /* ================================================================
@@ -1749,6 +1763,7 @@
     liveFreqData = data;
     if (tabKeys[state.analysisType] === 'frequency')
       drawGraph('frequency', state.comparison !== 0);
+    updateSummaryText();
   }
 
   function handleSnapshotFreqResponse(data) {
@@ -1761,6 +1776,7 @@
     thdData = data;
     if (tabKeys[state.analysisType] === 'distortion')
       drawGraph('distortion', false);
+    updateSummaryText();
   }
 
   function handlePhaseResponse(data) {
@@ -1782,6 +1798,8 @@
       } else if (btn.textContent.indexOf('Sweep') !== -1) {
         btn.innerHTML = '<span class="play-icon">&#9654;</span> Analyze';
         btn.style.background = '';
+        // Sweep just finished — generate summary with completed dynamics data
+        updateSummaryText();
       }
     }
   }
@@ -1790,6 +1808,7 @@
     latencyData = data;
     if (tabKeys[state.analysisType] === 'latency')
       drawGraph('latency', false);
+    updateSummaryText();
   }
 
   /* ---- Plugin B data handlers (called by C++ timerCallback via evaluateJavascript) ---- */
@@ -2011,6 +2030,14 @@
       }, 800);
     }
 
+    // Reset summary panels to show analysis is underway
+    if (state.viewMode === 0) {
+      var placeholder = 'Analyzing\u2026 results will appear shortly.';
+      document.getElementById('summary-musical').textContent     = placeholder;
+      document.getElementById('summary-practical').textContent   = placeholder;
+      document.getElementById('summary-educational').textContent = placeholder;
+    }
+
     // Tell C++ to flush FIFOs and reset averaging so measurement is fresh
     callNative('analyzeRequested', {
       testSignal:   state.testSignal,
@@ -2056,6 +2083,206 @@
 
   function onLoadPlugin() {
     // Fallback — no-op, plugin loading now done via plugin list
+  }
+
+  /* ================================================================
+     SUMMARY TEXT GENERATION
+     Called after each data push to populate the Musical, Practical,
+     and Educational interpretation panels.
+  ================================================================ */
+
+  function _freqBandAverages(data) {
+    // Returns {lowAvg, midAvg, highAvg} in dB for three broad bands.
+    if (!data || data.length < 4) return null;
+    var ls = 0, lc = 0, ms = 0, mc = 0, hs = 0, hc = 0;
+    for (var i = 0; i < data.length; i++) {
+      var f = data[i][0], db = data[i][1];
+      if      (f >= 20   && f <  300)  { ls += db; lc++; }
+      else if (f >= 300  && f < 4000)  { ms += db; mc++; }
+      else if (f >= 4000 && f <= 20000){ hs += db; hc++; }
+    }
+    return {
+      lowAvg:  lc > 0 ? ls / lc : 0,
+      midAvg:  mc > 0 ? ms / mc : 0,
+      highAvg: hc > 0 ? hs / hc : 0
+    };
+  }
+
+  function _freqTonal(bands) {
+    // Returns a short tonal character phrase.
+    if (!bands) return null;
+    var lo = bands.lowAvg, mi = bands.midAvg, hi = bands.highAvg;
+    var range = Math.max(lo, mi, hi) - Math.min(lo, mi, hi);
+    if (range < 1.0) return 'flat and transparent';
+    var parts = [];
+    if      (lo > mi + 2)   parts.push('bass-heavy');
+    else if (lo > mi + 0.5) parts.push('full low end');
+    else if (lo < mi - 2)   parts.push('lean in the low end');
+    if (mi < lo - 2 && mi < hi - 1.5) parts.push('scooped mids');
+    else if (mi > lo + 1 && mi > hi + 1) parts.push('midrange-forward');
+    if      (hi > mi + 2)   parts.push('bright');
+    else if (hi > mi + 0.8) parts.push('airy highs');
+    else if (hi < mi - 2)   parts.push('dark');
+    return parts.length ? parts.join(', ') : 'balanced';
+  }
+
+  function _thdAnalysis(data) {
+    if (!data) return null;
+    var pct = (data.percent || 0) * 100;
+    var harmonics = data.harmonics || [];
+    var evenAmp = 0, oddAmp = 0;
+    for (var i = 1; i < harmonics.length; i++) {
+      var n = i + 1; // harmonic number starting at 2nd
+      var amp = Math.abs(harmonics[i][1]);
+      if (n % 2 === 0) evenAmp += amp; else oddAmp += amp;
+    }
+    var level;
+    if      (pct < 0.05) level = 'transparent';
+    else if (pct < 0.2)  level = 'very low';
+    else if (pct < 0.5)  level = 'subtle';
+    else if (pct < 1.5)  level = 'moderate';
+    else if (pct < 5.0)  level = 'noticeable';
+    else                 level = 'heavy';
+    var warmth = (evenAmp + oddAmp < 0.001) ? 'clean'
+               : (evenAmp >= oddAmp) ? 'warm (even-order)'
+               : 'gritty (odd-order)';
+    return { pct: pct, level: level, warmth: warmth, evenAmp: evenAmp, oddAmp: oddAmp };
+  }
+
+  function _dynAnalysis(data) {
+    if (!data || !data.points || data.points.length < 5) return null;
+    var pts = data.points;
+    // Find gain reduction around -30 dBFS input
+    var gr = null;
+    for (var i = 0; i < pts.length; i++) {
+      if (pts[i][0] >= -32 && pts[i][0] <= -28) { gr = pts[i][1] - pts[i][0]; break; }
+    }
+    if (gr === null) { var mid = Math.floor(pts.length / 2); gr = pts[mid][1] - pts[mid][0]; }
+    var level;
+    if      (gr > -0.3) level = 'transparent';
+    else if (gr > -1.5) level = 'gentle';
+    else if (gr > -4)   level = 'moderate';
+    else if (gr > -8)   level = 'heavy';
+    else                level = 'limiting';
+    return { gr: gr, level: level };
+  }
+
+  function _latAnalysis(data) {
+    if (!data) return null;
+    var ms = data.msA > 0 ? data.msA : data.msB;
+    var samp = data.methodA > 0 ? data.methodA : data.methodB;
+    var level;
+    if      (ms < 1)  level = 'undetectable';
+    else if (ms < 5)  level = 'imperceptible';
+    else if (ms < 20) level = 'low';
+    else if (ms < 50) level = 'moderate';
+    else              level = 'high';
+    return { ms: ms, samples: samp, level: level };
+  }
+
+  function _fmtDb(db) {
+    var r = Math.round(db * 10) / 10;
+    return (r >= 0 ? '+' : '') + r + ' dB';
+  }
+
+  function updateSummaryText() {
+    // Summary panel only visible in Simplified view (viewMode 0)
+    if (state.viewMode !== 0) return;
+    if (!liveFreqData && !thdData && !dynamicsData && !latencyData) return;
+
+    var name  = loadedPluginNameA || 'This plugin';
+    var bands = liveFreqData ? _freqBandAverages(liveFreqData) : null;
+    var tonal = bands ? _freqTonal(bands) : null;
+    var thd   = _thdAnalysis(thdData);
+    var dyn   = _dynAnalysis(dynamicsData);
+    var lat   = _latAnalysis(latencyData);
+
+    /* ---- Musical ---- */
+    var musical = [];
+    if (tonal)
+      musical.push(name + ' has a ' + tonal + ' character.');
+    if (thd && thd.level === 'transparent')
+      musical.push('Harmonically clean - what goes in comes out unchanged.');
+    else if (thd)
+      musical.push('Adds ' + thd.level + ', ' + thd.warmth + ' saturation'
+        + (thd.evenAmp >= thd.oddAmp ? ' - smooth and analog-flavored.' : ' - edgy and present.'));
+    if (dyn && dyn.level !== 'transparent')
+      musical.push('Dynamics feel ' + dyn.level
+        + (dyn.level === 'gentle' ? ' - natural-sounding control.'
+         : dyn.level === 'moderate' ? ' - adds punch and glue.'
+         : ' - strongly shapes the envelope.'));
+    else if (dyn)
+      musical.push('Dynamics are untouched - fully transparent gain staging.');
+    if (!musical.length)
+      musical.push('Load a plugin and click Analyze to see its musical character.');
+
+    /* ---- Practical ---- */
+    var practical = [];
+    if (bands) {
+      practical.push('Frequency balance: lows ' + _fmtDb(bands.lowAvg)
+        + ', mids ' + _fmtDb(bands.midAvg) + ', highs ' + _fmtDb(bands.highAvg) + ' (band averages).');
+      if (bands.lowAvg > bands.midAvg + 2)
+        practical.push('Significant bass boost - consider a high-pass filter on stacked tracks to maintain clarity.');
+      if (bands.highAvg > bands.midAvg + 2)
+        practical.push('Elevated highs - watch for harshness on vocals and cymbals at high input levels.');
+      if (bands.midAvg < bands.lowAvg - 1.5 && bands.midAvg < bands.highAvg - 1.5)
+        practical.push('Scooped mids suit guitars and room mics but reduce presence on lead elements.');
+    }
+    if (thd) {
+      var thdAdvice;
+      if      (thd.level === 'transparent' || thd.level === 'very low') thdAdvice = 'no audible coloration.';
+      else if (thd.level === 'subtle')      thdAdvice = 'useful light warmth on buses.';
+      else if (thd.level === 'moderate')    thdAdvice = 'audible on transients - good for mix bus glue.';
+      else                                  thdAdvice = 'strong effect - use intentionally as a saturation tool.';
+      practical.push('THD: ' + thd.pct.toFixed(3) + '% - ' + thdAdvice);
+    }
+    if (dyn)
+      practical.push('Gain reduction at -30 dBFS: ' + _fmtDb(dyn.gr) + ' (' + dyn.level + ' compression).');
+    if (lat)
+      practical.push('Latency: ' + lat.ms.toFixed(2) + ' ms (' + lat.samples + ' samples) - '
+        + (lat.level === 'undetectable' || lat.level === 'imperceptible'
+           ? 'safe for real-time use.' : 'consider PDC compensation in your DAW.'));
+    if (!practical.length)
+      practical.push('Practical impact - how this plugin behaves in a mix - appears here after analysis.');
+
+    /* ---- Educational ---- */
+    var educational = [];
+    if (bands) {
+      educational.push('Frequency response compares plugin output to a flat input. '
+        + 'Measured bands: 20-300 Hz (low), 300 Hz-4 kHz (mid), 4-20 kHz (high). '
+        + 'Results: ' + _fmtDb(bands.lowAvg) + ' low, '
+        + _fmtDb(bands.midAvg) + ' mid, ' + _fmtDb(bands.highAvg) + ' high.');
+    }
+    if (thd) {
+      educational.push('THD (Total Harmonic Distortion) measures nonlinear coloration. '
+        + 'Even-order harmonics (2nd, 4th, 6th) produce warm, musical saturation typical of tube circuits. '
+        + 'Odd-order harmonics (3rd, 5th, 7th) create harder-sounding distortion associated with clipping. '
+        + 'Measured: ' + thd.pct.toFixed(3) + '% THD - ' + thd.warmth + '.');
+    }
+    if (dyn) {
+      educational.push('The dynamics transfer curve plots output level (Y) against input level (X). '
+        + 'The dashed diagonal is unity gain (no change). '
+        + 'Deviation below it indicates gain reduction. '
+        + 'Gain reduction at -30 dBFS: ' + _fmtDb(dyn.gr) + '.');
+    }
+    if (lat) {
+      if (state.comparison !== 0) {
+        educational.push('Latency is measured two ways: Method A reads the plugin\'s reported value via '
+          + 'getLatencySamples(); Method B correlates an impulse empirically through the signal path. '
+          + 'Disagreement between methods can indicate lookahead or PDC miscalculation. '
+          + 'Result: ' + lat.ms.toFixed(2) + ' ms (' + lat.samples + ' samples).');
+      } else {
+        educational.push('Latency is the delay introduced between input and output. '
+          + 'It is measured by correlating an impulse through the signal path. '
+          + 'Result: ' + lat.ms.toFixed(2) + ' ms (' + lat.samples + ' samples).');
+      }
+    }
+    if (!educational.length)
+      educational.push('Technical explanations of filter topology, phase behavior, and harmonic content appear here after analysis.');
+
+    document.getElementById('summary-musical').textContent     = musical.join('  ');
+    document.getElementById('summary-practical').textContent   = practical.join('  ');
+    document.getElementById('summary-educational').textContent = educational.join('  ');
   }
 
   /* ================================================================

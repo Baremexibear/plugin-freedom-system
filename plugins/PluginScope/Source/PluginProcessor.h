@@ -113,6 +113,11 @@ public:
     int   getLatencyMethodB()   const { return latencyMethodB.load(); }
     float getLatencyMsA()       const { return latencyMsA.load(); }
     float getLatencyMsB()       const { return latencyMsB.load(); }
+    // Plugin B latency (-1 = not yet measured / no plugin loaded)
+    int   getLatencyMethodAB()  const { return latencyMethodAB.load(); }
+    int   getLatencyMethodBB()  const { return latencyMethodBB.load(); }
+    float getLatencyMsAB()      const { return latencyMsAB.load(); }
+    float getLatencyMsBB()      const { return latencyMsBB.load(); }
     void  triggerLatencyMeasurement() { latencyImpulsePending.store (true); }
 
     // Flush stale capture FIFOs and reset averaging accumulators on the analysis thread.
@@ -297,10 +302,15 @@ private:
     std::atomic<bool> analysisResetPending { false };
 
     // Latency results — written exclusively by analysis thread, read by UI via atomics
-    std::atomic<int>   latencyMethodA { 0 };   // samples from getLatencySamples()
-    std::atomic<int>   latencyMethodB { 0 };   // samples from empirical measurement
-    std::atomic<float> latencyMsA     { 0.0f };
-    std::atomic<float> latencyMsB     { 0.0f };
+    std::atomic<int>   latencyMethodA  { 0 };    // Plugin A: getLatencySamples()
+    std::atomic<int>   latencyMethodB  { 0 };    // Plugin A: empirical impulse
+    std::atomic<float> latencyMsA      { 0.0f };
+    std::atomic<float> latencyMsB      { 0.0f };
+    // Plugin B latency (-1 = not yet measured)
+    std::atomic<int>   latencyMethodAB { -1 };   // Plugin B: getLatencySamples()
+    std::atomic<int>   latencyMethodBB { -1 };   // Plugin B: empirical impulse
+    std::atomic<float> latencyMsAB     { 0.0f };
+    std::atomic<float> latencyMsBB     { 0.0f };
 
     // Phase 3.7: A/B Plugin Hosting
     std::unique_ptr<juce::AudioPluginInstance> hostedPluginB;

@@ -1086,62 +1086,86 @@ private:
         }
 
         // Method B: empirical impulse measurement
-        // 1. Flush any stale samples from the wet capture FIFO
+        // 1. Flush any stale samples from both capture FIFOs
         {
-            const int avail = proc.captureFifo.getNumReady();
-            if (avail > 0)
+            auto flushFifo = [] (juce::AbstractFifo& f)
             {
-                int s1, sz1, s2, sz2;
-                proc.captureFifo.prepareToRead (avail, s1, sz1, s2, sz2);
-                proc.captureFifo.finishedRead (sz1 + sz2);
-            }
+                const int avail = f.getNumReady();
+                if (avail > 0)
+                {
+                    int s1, sz1, s2, sz2;
+                    f.prepareToRead (avail, s1, sz1, s2, sz2);
+                    f.finishedRead (sz1 + sz2);
+                }
+            };
+            flushFifo (proc.captureFifo);
+            flushFifo (proc.captureFifoB);
         }
 
-        // 2. Trigger impulse injection in processBlock
+        // 2. Trigger impulse injection in processBlock (goes through A and B simultaneously)
         proc.latencyImpulsePending.store (true);
 
-        // 3. Wait for up to 500 ms worth of samples to arrive in the FIFO
+        // 3. Wait for up to 500 ms worth of samples to arrive (both FIFOs when B is loaded)
+        const bool bLoaded       = proc.pluginBReady.load();
         const int maxWaitSamples = (int) (proc.currentSampleRate * 0.5);
         const int needed         = maxWaitSamples * 2;   // interleaved L+R pairs
         int waited               = 0;
-        while (! threadShouldExit()
-               && proc.captureFifo.getNumReady() < needed
-               && waited < 100)
+        while (! threadShouldExit() && waited < 100)
         {
+            const bool aReady = proc.captureFifo.getNumReady()  >= needed;
+            const bool bReady = !bLoaded || proc.captureFifoB.getNumReady() >= needed;
+            if (aReady && bReady) break;
             juce::Thread::sleep (5);
             ++waited;
         }
 
-        // 4. Scan for first peak above threshold
-        const int ready = proc.captureFifo.getNumReady();
-        if (ready > 0)
+        // Helper: scan a capture FIFO for first sample above threshold and return sample index
+        auto scanFifoForPeak = [&] (juce::AbstractFifo& fifo,
+                                    juce::AudioBuffer<float>& buf) -> int
         {
+            const int ready = fifo.getNumReady();
+            if (ready <= 0) return -1;
             int s1, sz1, s2, sz2;
-            proc.captureFifo.prepareToRead (ready, s1, sz1, s2, sz2);
-
-            constexpr float kThreshold = 0.001f;   // -60 dBFS threshold
+            fifo.prepareToRead (ready, s1, sz1, s2, sz2);
+            constexpr float kThreshold = 0.001f;   // -60 dBFS
             int peakIndex = -1;
-
-            // Search region 1 (even indices = left channel in interleaved buffer)
             for (int i = 0; i < sz1 && peakIndex < 0; i += 2)
-            {
-                if (std::abs (proc.captureBuffer.getSample (0, s1 + i)) > kThreshold)
+                if (std::abs (buf.getSample (0, s1 + i)) > kThreshold)
                     peakIndex = (s1 + i) / 2;
-            }
-            // Search region 2 (wrap-around)
             for (int i = 0; i < sz2 && peakIndex < 0; i += 2)
-            {
-                if (std::abs (proc.captureBuffer.getSample (0, s2 + i)) > kThreshold)
+                if (std::abs (buf.getSample (0, s2 + i)) > kThreshold)
                     peakIndex = (sz1 / 2) + (s2 + i) / 2;
-            }
+            fifo.finishedRead (sz1 + sz2);
+            return peakIndex;
+        };
 
-            proc.captureFifo.finishedRead (sz1 + sz2);
-
+        // 4. Plugin A — empirical scan
+        {
+            const int peakIndex = scanFifoForPeak (proc.captureFifo, proc.captureBuffer);
             if (peakIndex >= 0)
             {
                 proc.latencyMethodB.store (peakIndex);
                 proc.latencyMsB.store ((float) peakIndex * 1000.0f
                                        / (float) proc.currentSampleRate);
+            }
+        }
+
+        // 5. Plugin B — Method A (direct query) + Method B (empirical scan)
+        if (bLoaded && proc.hostedPluginB != nullptr)
+        {
+            // Method A: self-reported
+            const int samplesAB = proc.hostedPluginB->getLatencySamples();
+            proc.latencyMethodAB.store (samplesAB);
+            proc.latencyMsAB.store ((float) samplesAB * 1000.0f
+                                    / (float) proc.currentSampleRate);
+
+            // Method B: empirical
+            const int peakIndexB = scanFifoForPeak (proc.captureFifoB, proc.captureBufferB);
+            if (peakIndexB >= 0)
+            {
+                proc.latencyMethodBB.store (peakIndexB);
+                proc.latencyMsBB.store ((float) peakIndexB * 1000.0f
+                                        / (float) proc.currentSampleRate);
             }
         }
 
@@ -1618,30 +1642,41 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                 latencyImpulsePending.store (false);
             }
 
+            // Plugin A — impulse through A, capture to captureFifo
             {
                 const juce::SpinLock::ScopedTryLockType sl (pluginLock);
                 if (sl.isLocked() && pluginReady.load() && hostedPlugin != nullptr)
                 {
-                    // Copy impulse signal into processing buffer as plugin input
+                    const int nCh = hostedOutputBuffer.getNumChannels();
+                    for (int ch = 0; ch < nCh; ++ch)
                     {
-                        const int nCh = hostedOutputBuffer.getNumChannels();
-                        for (int ch = 0; ch < nCh; ++ch)
-                        {
-                            const int srcCh = juce::jmin (ch, hostedInputBuffer.getNumChannels() - 1);
-                            hostedOutputBuffer.copyFrom (ch, 0, hostedInputBuffer, srcCh, 0, numSamples);
-                        }
+                        const int srcCh = juce::jmin (ch, hostedInputBuffer.getNumChannels() - 1);
+                        hostedOutputBuffer.copyFrom (ch, 0, hostedInputBuffer, srcCh, 0, numSamples);
                     }
                     juce::MidiBuffer emptyMidi;
-                    try
-                    {
-                        hostedPlugin->processBlock (hostedOutputBuffer, emptyMidi);
-                    }
-                    catch (...)
-                    {
-                        pluginReady.store (false);
-                    }
+                    try { hostedPlugin->processBlock (hostedOutputBuffer, emptyMidi); }
+                    catch (...) { pluginReady.store (false); }
                     if (pluginReady.load())
                         captureOutputSamples (numSamples);
+                }
+            }
+
+            // Plugin B — same impulse through B, capture to captureFifoB
+            {
+                const juce::SpinLock::ScopedTryLockType slB (pluginBLock);
+                if (slB.isLocked() && pluginBReady.load() && hostedPluginB != nullptr)
+                {
+                    const int nCh = hostedOutputBufferB.getNumChannels();
+                    for (int ch = 0; ch < nCh; ++ch)
+                    {
+                        const int srcCh = juce::jmin (ch, hostedInputBuffer.getNumChannels() - 1);
+                        hostedOutputBufferB.copyFrom (ch, 0, hostedInputBuffer, srcCh, 0, numSamples);
+                    }
+                    juce::MidiBuffer emptyMidi;
+                    try { hostedPluginB->processBlock (hostedOutputBufferB, emptyMidi); }
+                    catch (...) { pluginBReady.store (false); }
+                    if (pluginBReady.load())
+                        captureOutputSamplesB (numSamples);
                 }
             }
 

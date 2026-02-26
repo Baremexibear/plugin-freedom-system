@@ -142,11 +142,6 @@ PluginScopeAudioProcessorEditor::PluginScopeAudioProcessorEditor (PluginScopeAud
     // Add WebView (fills entire window)
     addAndMakeVisible (*webView);
 
-    // Add hosted plugin overlay panel (sits on top of WebView left panel area)
-    // Initially invisible — shown when a plugin loads
-    hostedPluginPanel.setVisible (false);
-    addAndMakeVisible (hostedPluginPanel);
-
     // Navigate to embedded resource root
     webView->goToURL (juce::WebBrowserComponent::getResourceProviderRoot());
 
@@ -200,21 +195,6 @@ void PluginScopeAudioProcessorEditor::resized()
     // WebView fills the entire editor window.
     // HTML/CSS handles all internal layout via percentage-based flexbox.
     webView->setBounds (getLocalBounds());
-
-    // Hosted plugin panel occupies left panel area (first 32% of width, matching CSS #plugin-panel)
-    // min 240px, max 400px — matches CSS constraints
-    const int leftPanelWidth = juce::jlimit (240, 400, (int) (getWidth() * 0.32f));
-    const int toolbarHeight  = 52;   // CSS: #toolbar height: 52px
-    const int summaryHeight  = 148;  // CSS: #summary-panel height: 148px
-
-    // Hosted plugin panel sits in the left panel below the toolbar
-    hostedPluginPanel.setBounds (0, toolbarHeight,
-                                 leftPanelWidth,
-                                 getHeight() - toolbarHeight - summaryHeight);
-
-    // Resize hosted editor to fill the panel
-    if (hostedPluginEditor != nullptr)
-        hostedPluginEditor->setBounds (hostedPluginPanel.getLocalBounds());
 }
 
 //==============================================================================
@@ -296,9 +276,46 @@ void PluginScopeAudioProcessorEditor::pushPluginListToWebView()
         return;
     }
 
-    // Scan complete — build JSON array and push full list
+    // Scan complete — deduplicate by plugin name and build JSON array.
+    //
+    // The KnownPluginList can contain multiple entries for the same plugin
+    // (e.g. both VST3 and AudioUnit versions).  We show only ONE entry per
+    // name, choosing the most reliable format on macOS:
+    //   AudioUnit  >  VST3
+    // AU plugins are native macOS and load via the CoreAudio API, making
+    // them far less likely to fail with "Unable to load plug-in file" errors
+    // caused by code-signing, quarantine, or architecture mismatches in VST3
+    // bundles.  VST3 is used as a fallback only when no AU version exists.
+
     knownDescs.clear();
-    knownDescs = processorRef.getKnownPlugins();
+    {
+        // Format priority: lower index = preferred
+        auto formatPriority = [] (const juce::String& fmt) -> int
+        {
+            if (fmt == "AudioUnit") return 0;
+            if (fmt == "VST3")      return 1;
+            return 2;
+        };
+
+        // Build name -> best description map
+        std::map<juce::String, juce::PluginDescription> bestByName;
+        for (const auto& desc : processorRef.getKnownPlugins())
+        {
+            auto it = bestByName.find (desc.name);
+            if (it == bestByName.end())
+            {
+                bestByName[desc.name] = desc;
+            }
+            else if (formatPriority (desc.pluginFormatName)
+                     < formatPriority (it->second.pluginFormatName))
+            {
+                it->second = desc;  // Replace with higher-priority format
+            }
+        }
+
+        for (auto& [name, desc] : bestByName)
+            knownDescs.add (desc);
+    }
 
     juce::String jsonArray = "[";
     bool first = true;
@@ -308,8 +325,7 @@ void PluginScopeAudioProcessorEditor::pushPluginListToWebView()
         if (!first) jsonArray += ",";
         first = false;
 
-        // Escape plugin name (remove double-quotes to avoid JSON injection)
-        juce::String safeName = desc.name.replace ("\"", "\\\"");
+        juce::String safeName   = desc.name.replace ("\"", "\\\"");
         juce::String safeFormat = desc.pluginFormatName.replace ("\"", "\\\"");
 
         jsonArray += "{\"index\":" + juce::String (i)
@@ -390,30 +406,80 @@ void PluginScopeAudioProcessorEditor::handleNativeEvent (const juce::var& eventD
                 // Use lifetime sentinel to guard the callback
                 auto sentinel = processorRef.processorAlive;
 
-                processorRef.loadPlugin (
-                    desc,
-                    [this, name = desc.name, sentinel] (bool success, const juce::String& error)
+                // Build a helper that tries to load a description and,
+                // on failure, retries with any alternative format for the
+                // same plugin name found in knownPluginList.
+                auto onLoadResult = [this, name = desc.name, sentinel]
+                    (bool success, const juce::String& error)
+                {
+                    if (!sentinel->load()) return;
+
+                    if (success)
                     {
-                        // Callback fires on message thread
-                        if (!sentinel->load()) return;
-
-                        juce::String js;
-                        if (success)
+                        // Notify JS immediately so the "loading" spinner clears.
+                        if (webView != nullptr)
                         {
+                            juce::String js = "if (typeof handlePluginLoaded === 'function') "
+                                "handlePluginLoaded(\"" + name.replace ("\"", "\\\"") + "\");";
+                            webView->evaluateJavascript (js,
+                                [] (juce::WebBrowserComponent::EvaluationResult) {});
+                        }
+
+                        // Defer editor window creation to the next event-loop iteration
+                        // so createEditor() (which can take seconds) doesn't block the
+                        // JS notification above from reaching the WebView.
+                        juce::MessageManager::callAsync ([this, sentinel]
+                        {
+                            if (! sentinel->load()) return;
                             embedHostedEditor();
-                            js = "if (typeof handlePluginLoaded === 'function') "
-                                 "handlePluginLoaded(\"" + name.replace ("\"", "\\\"") + "\");";
-                        }
-                        else
-                        {
-                            js = "if (typeof handlePluginLoadError === 'function') "
-                                 "handlePluginLoadError(\"" + error.replace ("\"", "\\\"") + "\");";
-                        }
-
+                            processorRef.activatePlugin();
+                        });
+                    }
+                    else
+                    {
+                        juce::String js = "if (typeof handlePluginLoadError === 'function') "
+                            "handlePluginLoadError(\"" + error.replace ("\"", "\\\"") + "\");";
                         if (webView != nullptr)
                             webView->evaluateJavascript (js,
-                                                          [] (juce::WebBrowserComponent::EvaluationResult) {});
-                    });
+                                [] (juce::WebBrowserComponent::EvaluationResult) {});
+                    }
+                };
+
+                // If the preferred format fails, fall back to any other
+                // format for the same plugin name (e.g. AU when VST3 fails).
+                auto onLoadWithFallback = [this, desc, sentinel,
+                                           onLoadResult = std::move (onLoadResult)]
+                    (bool success, const juce::String& error) mutable
+                {
+                    if (success || !sentinel->load()) { onLoadResult (success, error); return; }
+
+                    // Search for an alternative format in the full known list
+                    juce::PluginDescription fallback;
+                    bool foundFallback = false;
+                    for (const auto& p : processorRef.getKnownPlugins())
+                    {
+                        if (p.name == desc.name && p.pluginFormatName != desc.pluginFormatName)
+                        {
+                            fallback     = p;
+                            foundFallback = true;
+                            break;
+                        }
+                    }
+
+                    if (foundFallback)
+                    {
+                        juce::Logger::writeToLog ("[PluginScope] " + desc.pluginFormatName
+                            + " failed for \"" + desc.name + "\", retrying as "
+                            + fallback.pluginFormatName);
+                        processorRef.loadPlugin (fallback, std::move (onLoadResult));
+                    }
+                    else
+                    {
+                        onLoadResult (false, error);
+                    }
+                };
+
+                processorRef.loadPlugin (desc, std::move (onLoadWithFallback));
             }
         }
         else
@@ -435,6 +501,17 @@ void PluginScopeAudioProcessorEditor::handleNativeEvent (const juce::var& eventD
     }
     else if (type == "scanPluginsRequested")
     {
+        juce::Logger::writeToLog ("[PluginScope] scanPluginsRequested received from WebView");
+
+        // Immediately confirm to JS that we received the request
+        if (webView != nullptr)
+        {
+            webView->evaluateJavascript (
+                "if (typeof handleScanProgress === 'function') handleScanProgress(0);",
+                [] (juce::WebBrowserComponent::EvaluationResult) {});
+        }
+
+        processorRef.scanScannedCount.store (0);
         processorRef.scanComplete.store (false);
         processorRef.startPluginScan();
     }
@@ -465,23 +542,47 @@ void PluginScopeAudioProcessorEditor::embedHostedEditor()
     if (plugin->hasEditor())
     {
         hostedPluginEditor.reset (plugin->createEditor());
-        if (hostedPluginEditor != nullptr)
-        {
-            hostedPluginPanel.setVisible (true);
-            hostedPluginPanel.addAndMakeVisible (*hostedPluginEditor);
-            hostedPluginEditor->setBounds (hostedPluginPanel.getLocalBounds());
-            resized(); // Re-layout so hosted editor gets correct size
-        }
+        if (hostedPluginEditor == nullptr)
+            return;
     }
+    else
+    {
+        // Plugin has no GUI — nothing to show
+        return;
+    }
+
+    // Show the editor in a separate floating window.
+    // We cannot embed it as a child of this editor because WKWebView (the
+    // macOS WebKit native view) always paints on top of all JUCE components
+    // in the same NSWindow, making any overlay invisible.  A separate
+    // DocumentWindow has its own NSWindow and correct z-order.
+    hostedEditorWindow = std::make_unique<HostedEditorWindow> (
+        plugin->getName(), hostedPluginEditor.get());
+
+    // When the user closes the floating window, unload the plugin and
+    // notify the WebView JS so the browser panel updates.
+    hostedEditorWindow->onClose = [this]
+    {
+        processorRef.unloadPlugin();
+        hostedEditorWindow.reset();
+        hostedPluginEditor.reset();
+
+        if (webView != nullptr)
+            webView->evaluateJavascript (
+                "if (typeof handlePluginUnloaded === 'function') handlePluginUnloaded();",
+                [] (juce::WebBrowserComponent::EvaluationResult) {});
+    };
 }
 
 //==============================================================================
 void PluginScopeAudioProcessorEditor::removeHostedEditor()
 {
-    if (hostedPluginEditor != nullptr)
+    if (hostedEditorWindow != nullptr)
     {
-        hostedPluginPanel.removeChildComponent (hostedPluginEditor.get());
-        hostedPluginEditor.reset();
+        hostedEditorWindow->onClose = nullptr; // prevent re-entrant unloadPlugin
+        hostedEditorWindow->setVisible (false);
+        hostedEditorWindow.reset();
     }
-    hostedPluginPanel.setVisible (false);
+
+    hostedPluginEditor.reset();
 }

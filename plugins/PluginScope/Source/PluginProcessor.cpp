@@ -2021,7 +2021,7 @@ static juce::PluginDescription resolveVST3Description (
     }
 
     juce::Logger::writeToLog ("[PluginScope] WARNING: could not resolve VST3 IDs for \""
-        + desc.name + "\" — loading with scanned description");
+        + desc.name + "\" - loading with scanned description");
     return desc;
 }
 
@@ -2110,7 +2110,7 @@ void PluginScopeAudioProcessor::loadPlugin (
             else
             {
                 juce::Logger::writeToLog ("[PluginScope] loadPlugin FAILED: \""
-                    + descName + "\" (" + descFmt + ") — " + error);
+                    + descName + "\" (" + descFmt + ") - " + error);
                 if (callback)
                     callback (false, error);
             }

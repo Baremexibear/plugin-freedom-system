@@ -428,7 +428,7 @@ void PluginScopeAudioProcessorEditor::handleNativeEvent (const juce::var& eventD
         // averaging accumulators.  The thread picks this up on its next loop
         // iteration and starts a genuinely fresh measurement from clean state.
         processorRef.triggerAnalysisReset();
-        juce::Logger::writeToLog ("[PluginScope] analyzeRequested — reset pending");
+        juce::Logger::writeToLog ("[PluginScope] analyzeRequested - reset pending");
     }
     else if (type == "loadPluginRequested")
     {
@@ -639,12 +639,12 @@ void PluginScopeAudioProcessorEditor::handleNativeEvent (const juce::var& eventD
     else if (type == "snapshotRequested")
     {
         processorRef.takeSnapshot();
-        juce::Logger::writeToLog ("[PluginScope] snapshotRequested — snapshot taken");
+        juce::Logger::writeToLog ("[PluginScope] snapshotRequested - snapshot taken");
     }
     else if (type == "triggerLatencyRequested")
     {
         processorRef.triggerLatencyMeasurement();
-        juce::Logger::writeToLog ("[PluginScope] triggerLatencyRequested — impulse pending");
+        juce::Logger::writeToLog ("[PluginScope] triggerLatencyRequested - impulse pending");
     }
     else if (type == "exportRequested")
     {
@@ -1069,7 +1069,7 @@ void PluginScopeAudioProcessorEditor::performExport (const juce::File& destFile)
     csv << "# FREQUENCY RESPONSE\n";
     if (freqA.empty())
     {
-        csv << "# (no frequency response data — run analysis first)\n\n";
+        csv << "# (no frequency response data - run analysis first)\n\n";
     }
     else
     {
@@ -1138,7 +1138,7 @@ void PluginScopeAudioProcessorEditor::performExport (const juce::File& destFile)
     csv << "# THD HARMONICS\n";
     if (harmonics.empty())
     {
-        csv << "# (no THD data — switch to Distortion analysis and run)\n\n";
+        csv << "# (no THD data - switch to Distortion analysis and run)\n\n";
     }
     else
     {
@@ -1157,7 +1157,7 @@ void PluginScopeAudioProcessorEditor::performExport (const juce::File& destFile)
     csv << "# PHASE RESPONSE\n";
     if (phaseA.empty())
     {
-        csv << "# (no phase data — switch to Phase analysis and run)\n\n";
+        csv << "# (no phase data - switch to Phase analysis and run)\n\n";
     }
     else
     {
@@ -1200,7 +1200,7 @@ void PluginScopeAudioProcessorEditor::performExport (const juce::File& destFile)
     csv << "# DYNAMICS (gain transfer function)\n";
     if (dynA.empty())
     {
-        csv << "# (no dynamics data — switch to Dynamics analysis and run)\n\n";
+        csv << "# (no dynamics data - switch to Dynamics analysis and run)\n\n";
     }
     else
     {
@@ -1224,7 +1224,7 @@ void PluginScopeAudioProcessorEditor::performExport (const juce::File& destFile)
     csv << "# LATENCY\n";
     if (latA < 0 && latB2 < 0)
     {
-        csv << "# (no latency data — switch to Latency analysis and run)\n\n";
+        csv << "# (no latency data - switch to Latency analysis and run)\n\n";
     }
     else
     {

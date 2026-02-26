@@ -534,10 +534,58 @@ private:
                     alpha * (frame[bin].second - proc.freqResponseAccum[bin].second);
         }
 
-        // Publish result (lock protected — read by UI thread via getFreqResponse())
+        // Publish Plugin A result
         {
             const juce::ScopedLock lock (proc.resultMutex);
             proc.freqResponseResult = proc.freqResponseAccum;
+        }
+
+        // === Plugin B freq response (computed in the same pass when B is active) ===
+        // fftDryBuf still contains the valid dry FFT from the A computation above.
+        // Read B's wet output, apply window+FFT, compute H_B = wet_B / dry.
+        if (proc.pluginBReady.load()
+            && proc.captureFifoB.getNumReady() / 2 >= needed)
+        {
+            proc.readFifoIntoBuffer (proc.captureFifoB, proc.captureBufferB,
+                                     proc.fftWetBuf.data(), needed);
+
+            proc.window.multiplyWithWindowingTable (proc.fftWetBuf.data(),
+                                                     (size_t) proc.kFftSize);
+            proc.fft.performRealOnlyForwardTransform (proc.fftWetBuf.data(), true);
+
+            std::vector<std::pair<float,float>> frameB (proc.kFreqBins);
+            for (int bin = 0; bin < proc.kFreqBins; ++bin)
+            {
+                const float binHz  = static_cast<float> (bin) * sampleRate
+                                     / static_cast<float> (proc.kFftSize);
+                const float wetRe  = proc.fftWetBuf[bin * 2];
+                const float wetIm  = proc.fftWetBuf[bin * 2 + 1];
+                const float dryRe  = proc.fftDryBuf[bin * 2];
+                const float dryIm  = proc.fftDryBuf[bin * 2 + 1];
+                const float dryMagSq = dryRe * dryRe + dryIm * dryIm + 1e-20f;
+                const float hRe    = (wetRe * dryRe + wetIm * dryIm) / dryMagSq;
+                const float hIm    = (wetIm * dryRe - wetRe * dryIm) / dryMagSq;
+                const float hMag   = std::sqrt (hRe * hRe + hIm * hIm);
+                frameB[bin] = { binHz, 20.0f * std::log10 (hMag + 1e-10f) };
+            }
+
+            proc.freqResponseFrameCountB++;
+            if (proc.freqResponseFrameCountB == 1 ||
+                (int) proc.freqResponseAccumB.size() != proc.kFreqBins)
+            {
+                proc.freqResponseAccumB = frameB;
+            }
+            else
+            {
+                const float alpha = 1.0f / static_cast<float> (
+                    juce::jmin (proc.freqResponseFrameCountB, 32));
+                for (int bin = 0; bin < proc.kFreqBins; ++bin)
+                    proc.freqResponseAccumB[bin].second +=
+                        alpha * (frameB[bin].second - proc.freqResponseAccumB[bin].second);
+            }
+
+            const juce::ScopedLock lock (proc.resultMutex);
+            proc.freqResponseResultB = proc.freqResponseAccumB;
         }
 
         juce::Thread::sleep (5);   // ~200 Hz max analysis rate; UI will throttle further
@@ -719,11 +767,46 @@ private:
         // Copy last valid bin to avoid undefined boundary
         groupDelayFrame[proc.kFreqBins - 1] = groupDelayFrame[proc.kFreqBins - 2];
 
-        // Publish results (lock protected — read by UI via getPhaseResponse()/getGroupDelay())
+        // Publish Plugin A phase results
         {
             const juce::ScopedLock lock (proc.resultMutex);
             proc.phaseResponseResult = phaseFrame;
             proc.groupDelayResult    = groupDelayFrame;
+        }
+
+        // === Plugin B phase response (reuses the dry FFT still in fftDryBuf) ===
+        if (proc.pluginBReady.load()
+            && proc.captureFifoB.getNumReady() / 2 >= needed)
+        {
+            proc.readFifoIntoBuffer (proc.captureFifoB, proc.captureBufferB,
+                                     proc.fftWetBuf.data(), needed);
+
+            proc.window.multiplyWithWindowingTable (proc.fftWetBuf.data(),
+                                                     (size_t) proc.kFftSize);
+            proc.fft.performRealOnlyForwardTransform (proc.fftWetBuf.data(), true);
+
+            std::vector<float> wrappedPhaseB (proc.kFreqBins);
+            std::vector<std::pair<float,float>> phaseFrameB (proc.kFreqBins);
+
+            for (int bin = 0; bin < proc.kFreqBins; ++bin)
+            {
+                const float wRe = proc.fftWetBuf[(size_t) (bin * 2)];
+                const float wIm = proc.fftWetBuf[(size_t) (bin * 2 + 1)];
+                const float dRe = proc.fftDryBuf[(size_t) (bin * 2)];
+                const float dIm = proc.fftDryBuf[(size_t) (bin * 2 + 1)];
+                const float dMagSq = dRe * dRe + dIm * dIm + 1e-20f;
+                const float hRe    = (wRe * dRe + wIm * dIm) / dMagSq;
+                const float hIm    = (wIm * dRe - wRe * dIm) / dMagSq;
+                wrappedPhaseB[bin]    = std::atan2 (hIm, hRe);
+                phaseFrameB[bin].first = (float) bin * binHz;
+            }
+
+            const std::vector<float> unwrappedB = unwrapPhase (wrappedPhaseB);
+            for (int bin = 0; bin < proc.kFreqBins; ++bin)
+                phaseFrameB[bin].second = unwrappedB[bin] * radToDeg;
+
+            const juce::ScopedLock lock (proc.resultMutex);
+            proc.phaseResponseResultB = phaseFrameB;
         }
 
         juce::Thread::sleep (20);   // ~50 Hz update rate
@@ -766,6 +849,16 @@ private:
         proc.captureFifo.finishedRead (sz1 + sz2);
     }
 
+    // Plugin B equivalent: flush stale samples from captureFifoB.
+    void flushCaptureFifoB()
+    {
+        const int available = proc.captureFifoB.getNumReady();
+        if (available <= 0) return;
+        int s1, sz1, s2, sz2;
+        proc.captureFifoB.prepareToRead (available, s1, sz1, s2, sz2);
+        proc.captureFifoB.finishedRead (sz1 + sz2);
+    }
+
     // Block until the wet capture FIFO contains at least numSamples×2 slots
     // (×2 because the FIFO stores interleaved L+R pairs).
     // Returns immediately if threadShouldExit() becomes true.
@@ -778,6 +871,35 @@ private:
                 return;
             juce::Thread::sleep (5);
         }
+    }
+
+    // Read numSamples×2 slots from captureFifoB and return the RMS of the left channel.
+    // Mirrors measureRmsFromFifo() but operates on Plugin B's capture buffer.
+    float measureRmsFromFifoB (int numSamples)
+    {
+        const int numSlots = numSamples * 2;
+        int s1, sz1, s2, sz2;
+        proc.captureFifoB.prepareToRead (numSlots, s1, sz1, s2, sz2);
+
+        float sumSq = 0.0f;
+        int count   = 0;
+
+        for (int i = 0; i < sz1; i += 2)
+        {
+            const float s = proc.captureBufferB.getSample (0, s1 + i);
+            sumSq += s * s;
+            ++count;
+        }
+        for (int i = 0; i < sz2; i += 2)
+        {
+            const float s = proc.captureBufferB.getSample (0, s2 + i);
+            sumSq += s * s;
+            ++count;
+        }
+
+        proc.captureFifoB.finishedRead (sz1 + sz2);
+
+        return (count > 0) ? std::sqrt (sumSq / (float) count) : 0.0f;
     }
 
     // Read numSamples×2 slots from the wet capture FIFO and return the RMS
@@ -848,7 +970,11 @@ private:
         const int numSteps = (int) ((kEndDb - kStartDb) / kStepDb) + 1;   // 61 steps
 
         std::vector<std::pair<float,float>> results;
+        std::vector<std::pair<float,float>> resultsB;
         results.reserve (numSteps);
+        resultsB.reserve (numSteps);
+
+        const bool bActive = proc.pluginBReady.load();
 
         for (int step = 0; step < numSteps && ! threadShouldExit(); ++step)
         {
@@ -862,23 +988,31 @@ private:
             // Set level — audio thread reads this atomically on next processBlock.
             proc.dynamicsSineLevel.store (inputLinear);
 
-            // Flush stale FIFO samples accumulated at the previous level.
+            // Flush stale FIFO samples from both A and B.
             flushCaptureFifo();
+            if (bActive) flushCaptureFifoB();
 
             // Wait for the hosted plugin to settle at the new level, then discard.
             waitForFifoSamples (settlingSamples);
             flushCaptureFifo();
+            if (bActive) flushCaptureFifoB();
 
             // Safety check before measuring.
             if (threadShouldExit() || (int) proc.analysisTypeParam->load() != 1)
                 break;
 
-            // Accumulate measurement window and compute RMS output level.
+            // Accumulate measurement window and compute RMS for both A and B.
             waitForFifoSamples (measureSamples);
             const float outputRmsLinear = measureRmsFromFifo (measureSamples);
             const float outputDb        = juce::Decibels::gainToDecibels (outputRmsLinear + 1e-10f);
-
             results.push_back ({ inputDb, outputDb });
+
+            if (bActive && proc.captureFifoB.getNumReady() >= measureSamples * 2)
+            {
+                const float rmsB  = measureRmsFromFifoB (measureSamples);
+                const float dbB   = juce::Decibels::gainToDecibels (rmsB + 1e-10f);
+                resultsB.push_back ({ inputDb, dbB });
+            }
 
             // Update progress for UI display (0-100).
             proc.dynamicsSweepProgress.store ((int) (100.0f * (float) (step + 1)
@@ -888,7 +1022,8 @@ private:
         // Publish results under the shared result lock.
         {
             const juce::ScopedLock lock (proc.resultMutex);
-            proc.dynamicsResult = results;
+            proc.dynamicsResult  = results;
+            proc.dynamicsResultB = resultsB;
         }
 
         // Silence the dynamics sine now that the sweep is complete.
@@ -1387,6 +1522,27 @@ std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getDynamicsResult
 {
     const juce::ScopedLock lock (resultMutex);
     return dynamicsResult;
+}
+
+//==============================================================================
+// Plugin B measurement accessors — mirrors A accessors, reads B result vectors.
+
+std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getFreqResponseB() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return freqResponseResultB;
+}
+
+std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getPhaseResponseB() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return phaseResponseResultB;
+}
+
+std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getDynamicsResultB() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return dynamicsResultB;
 }
 
 //==============================================================================

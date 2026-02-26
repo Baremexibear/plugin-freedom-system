@@ -97,6 +97,13 @@ public:
     // Phase 3.6: Dynamics Analysis Engine accessors (thread-safe)
     // Returns (input_dbfs, output_dbfs) pairs for the gain transfer function.
     std::vector<std::pair<float,float>> getDynamicsResult() const;
+
+    //==========================================================================
+    // Plugin B measurement accessors — parallel results for A/B comparison view.
+    // Each mirrors the corresponding Plugin A accessor but reads from B result storage.
+    std::vector<std::pair<float,float>> getFreqResponseB() const;
+    std::vector<std::pair<float,float>> getPhaseResponseB() const;
+    std::vector<std::pair<float,float>> getDynamicsResultB() const;
     int  getDynamicsSweepProgress() const { return dynamicsSweepProgress.load(); }
     bool isDynamicsSweepRunning()   const { return dynamicsSweepRunning.load(); }
 
@@ -237,6 +244,12 @@ private:
     std::vector<std::pair<float,float>> freqResponseResult;   // (freq_hz, mag_db) per bin
     std::vector<std::pair<float,float>> freqResponseAccum;    // Running average accumulator
     int freqResponseFrameCount { 0 };
+
+    // Plugin B freq response result — computed alongside A when B is loaded
+    std::vector<std::pair<float,float>> freqResponseResultB;
+    std::vector<std::pair<float,float>> freqResponseAccumB;
+    int freqResponseFrameCountB { 0 };
+
     mutable juce::CriticalSection resultMutex;
 
     // Background analysis thread
@@ -264,6 +277,9 @@ private:
     // Phase 3.5: Phase Response + Group Delay results (protected by resultMutex)
     std::vector<std::pair<float,float>> phaseResponseResult;  // (freq_hz, phase_degrees)
     std::vector<std::pair<float,float>> groupDelayResult;     // (freq_hz, group_delay_ms)
+
+    // Plugin B phase response result (protected by resultMutex)
+    std::vector<std::pair<float,float>> phaseResponseResultB;
 
     //==========================================================================
     // Phase 3.7: Latency Detection
@@ -314,7 +330,8 @@ private:
     std::atomic<bool> dynamicsSweepRunning  { false };
 
     // Dynamics gain transfer function result — protected by resultMutex.
-    std::vector<std::pair<float,float>> dynamicsResult;  // (input_dbfs, output_dbfs)
+    std::vector<std::pair<float,float>> dynamicsResult;   // (input_dbfs, output_dbfs)
+    std::vector<std::pair<float,float>> dynamicsResultB;  // Plugin B parallel result
 
     // FrequencyAnalysisThread accesses private members directly
     friend class FrequencyAnalysisThread;

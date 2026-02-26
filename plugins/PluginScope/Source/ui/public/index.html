@@ -1513,12 +1513,13 @@
   }
 
   function drawFrequencyCurveB(W, H, lineColor, fillTop, fillBottom) {
-    var src = snapshotFreqData;
+    var src = liveFreqDataB;  // Real Plugin B freq response from C++ analysis thread
     var points = [];
     if (src && src.length > 0) {
       for (var i = 0; i < src.length; i++)
         points.push([freqToX(src[i][0], W), dbToY(src[i][1], H)]);
     } else {
+      // Fallback demo curve shown before Plugin B has been measured
       for (var i = 0; i <= 300; i++) {
         var t = i / 300;
         var f = Math.pow(10, 1.301 + t * 2.999);
@@ -1560,10 +1561,11 @@
   }
 
   function drawDynamicsCurve(W, H, color, offset) {
-    var realPts = dynamicsData && dynamicsData.points && dynamicsData.points.length > 0
-                  ? dynamicsData.points : null;
+    var dataSource = offset ? dynamicsDataB : dynamicsData;
+    var realPts = dataSource && dataSource.points && dataSource.points.length > 0
+                  ? dataSource.points : null;
     var points = [];
-    if (realPts && !offset) {
+    if (realPts) {
       // Real data: [[input_db, output_db], ...], range -60..0
       for (var i = 0; i < realPts.length; i++) {
         var xi = (realPts[i][0] + 60) / 60 * W;
@@ -1628,13 +1630,14 @@
   }
 
   function drawPhaseCurve(W, H, color, offset) {
-    var src = phaseData;
+    var src = offset ? phaseDataB : phaseData;
     var points = [];
-    if (src && src.length > 0 && !offset) {
+    if (src && src.length > 0) {
       // Real data: [[freq_hz, degrees], ...]
       for (var i = 0; i < src.length; i++)
         points.push([freqToX(src[i][0], W), H * (1 - (src[i][1] + 180) / 360)]);
     } else {
+      // Fallback demo curve until real data arrives
       for (var i = 0; i <= 300; i++) {
         var t = i / 300;
         var f = Math.pow(10, 1.301 + t * 2.999);
@@ -1734,6 +1737,10 @@
   var phaseData        = null;  // [[freq_hz, degrees], ...] 256 points
   var dynamicsData     = null;  // {running: bool, progress: int, points: [[in_db, out_db], ...]}
   var latencyData      = null;  // {methodA: int, methodB: int, msA: float, msB: float}
+  // Plugin B parallel measurement data (populated by C++ when B is loaded and comparison is active)
+  var liveFreqDataB    = null;  // [[freq_hz, db], ...] Plugin B frequency response
+  var phaseDataB       = null;  // [[freq_hz, degrees], ...] Plugin B phase response
+  var dynamicsDataB    = null;  // {running: bool, points: [[in_db, out_db], ...]} Plugin B dynamics
 
   /* ================================================================
      DATA BRIDGE HANDLERS — called by C++ via evaluateJavascript()
@@ -1783,6 +1790,25 @@
     latencyData = data;
     if (tabKeys[state.analysisType] === 'latency')
       drawGraph('latency', false);
+  }
+
+  /* ---- Plugin B data handlers (called by C++ timerCallback via evaluateJavascript) ---- */
+  function handleFreqResponseB(data) {
+    liveFreqDataB = data;
+    if (tabKeys[state.analysisType] === 'frequency' && state.comparison !== 0)
+      drawGraph('frequency', true);
+  }
+
+  function handlePhaseResponseB(data) {
+    phaseDataB = data;
+    if (tabKeys[state.analysisType] === 'phase' && state.comparison !== 0)
+      drawGraph('phase', true);
+  }
+
+  function handleDynamicsResultB(data) {
+    dynamicsDataB = data;
+    if (tabKeys[state.analysisType] === 'dynamics' && state.comparison !== 0)
+      drawGraph('dynamics', true);
   }
 
   // Called by C++: handlePluginListUpdate(jsonArray)

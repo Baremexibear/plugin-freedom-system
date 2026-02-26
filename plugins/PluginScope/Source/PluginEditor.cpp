@@ -858,6 +858,14 @@ void PluginScopeAudioProcessorEditor::timerCallback()
                   "handleFreqResponse(" + logSpacedJson (d, 256) + ");");
     }
 
+    // === Plugin B Frequency Response (every tick when B loaded) =============
+    {
+        const auto d = processorRef.getFreqResponseB();
+        if (!d.empty())
+            call ("if(typeof handleFreqResponseB==='function')"
+                  "handleFreqResponseB(" + logSpacedJson (d, 256) + ");");
+    }
+
     // === Snapshot Frequency Response (every tick while snapshot exists) =====
     if (processorRef.getHasSnapshot())
     {
@@ -894,6 +902,26 @@ void PluginScopeAudioProcessorEditor::timerCallback()
             j += "]}";
             call ("if(typeof handleDynamicsResult==='function')handleDynamicsResult(" + j + ");");
         }
+
+        // Plugin B dynamics (same cadence — every tick while running, else slow tick)
+        {
+            const auto ptsB = processorRef.getDynamicsResultB();
+            if (!ptsB.empty())
+            {
+                juce::String jb ("{\"running\":"  + juce::String (dynRunning ? "true" : "false")
+                               + ",\"points\":[");
+                bool firstPt = true;
+                for (const auto& p : ptsB)
+                {
+                    if (!firstPt) jb += ",";
+                    jb += "[" + juce::String (p.first,  1)
+                        + "," + juce::String (p.second, 1) + "]";
+                    firstPt = false;
+                }
+                jb += "]}";
+                call ("if(typeof handleDynamicsResultB==='function')handleDynamicsResultB(" + jb + ");");
+            }
+        }
     }
 
     // === Slow measurements (every ~500 ms) ===================================
@@ -923,12 +951,20 @@ void PluginScopeAudioProcessorEditor::timerCallback()
             }
         }
 
-        // Phase Response
+        // Phase Response (A)
         {
             const auto d = processorRef.getPhaseResponse();
             if (!d.empty())
                 call ("if(typeof handlePhaseResponse==='function')"
                       "handlePhaseResponse(" + logSpacedJson (d, 256) + ");");
+        }
+
+        // Phase Response (B)
+        {
+            const auto d = processorRef.getPhaseResponseB();
+            if (!d.empty())
+                call ("if(typeof handlePhaseResponseB==='function')"
+                      "handlePhaseResponseB(" + logSpacedJson (d, 256) + ");");
         }
 
         // Latency

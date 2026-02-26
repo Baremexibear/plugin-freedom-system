@@ -772,6 +772,88 @@
     }
     #ab-badges.visible { display: flex; }
 
+    /* ============================================================
+       A/B SLOTS — visible when Compare = A/B Plugins
+    ============================================================ */
+    #ab-slots {
+      display: none;
+      flex-direction: column;
+      gap: 7px;
+      margin-bottom: 14px;
+    }
+    #ab-slots.visible { display: flex; }
+
+    .slot-strip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      background: #1F1F21;
+      border-radius: 8px;
+      border-left: 3px solid transparent;
+    }
+    .slot-a-strip { border-left-color: var(--accent); }
+    .slot-b-strip { border-left-color: var(--amber); }
+
+    .slot-name {
+      flex: 1;
+      font-size: 12px;
+      font-weight: 500;
+      color: #4A4A4E;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .slot-name.active  { color: #ffffff; }
+    .slot-name.loading { color: var(--text-muted); font-style: italic; }
+    .slot-name.error   { color: #ff453a; }
+
+    .slot-unload {
+      background: transparent;
+      border: none;
+      color: #4A4A4E;
+      font-size: 13px;
+      line-height: 1;
+      cursor: pointer;
+      padding: 0 2px;
+      flex-shrink: 0;
+      display: none;
+    }
+    .slot-unload.visible { display: block; }
+    .slot-unload:hover   { color: #ff453a; }
+
+    /* A/B assign buttons inside plugin list items */
+    .ab-assign-btns {
+      display: flex;
+      gap: 4px;
+      flex-shrink: 0;
+      margin-left: auto;
+    }
+    .assign-btn {
+      border: none;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 3px 7px;
+      cursor: pointer;
+      font-family: inherit;
+      line-height: 1.3;
+    }
+    .assign-a { background: rgba(10,132,255,0.2); color: var(--accent); }
+    .assign-a:hover { background: var(--accent); color: #fff; }
+    .assign-b { background: rgba(255,159,10,0.2); color: var(--amber); }
+    .assign-b:hover { background: var(--amber); color: #fff; }
+
+    /* plugin-list-item flex tweak for AB mode */
+    .plugin-list-item.ab-item {
+      cursor: default;
+    }
+    .plugin-list-item.ab-item:hover {
+      background: transparent;
+    }
+    .plugin-list-item.ab-item .item-name { flex: 1; }
+
   </style>
 </head>
 <body>
@@ -860,9 +942,26 @@
     ============================================================ -->
     <div id="plugin-panel">
 
-      <!-- Loaded plugin header -->
-      <div class="section-label">Loaded Plugin</div>
-      <div class="plugin-name" id="plugin-name-display">No plugin loaded</div>
+      <!-- Single-plugin header (visible when Compare = Off or Before-After) -->
+      <div id="single-plugin-header">
+        <div class="section-label">Loaded Plugin</div>
+        <div class="plugin-name" id="plugin-name-display">No plugin loaded</div>
+      </div>
+
+      <!-- A/B Slots panel (visible when Compare = A/B Plugins) -->
+      <div id="ab-slots">
+        <div class="section-label">A / B Plugins</div>
+        <div class="slot-strip slot-a-strip">
+          <span class="comparison-badge badge-a">A</span>
+          <span class="slot-name" id="slot-a-name">No plugin assigned</span>
+          <button class="slot-unload" id="slot-a-unload" onclick="onUnloadSlot('A')" title="Unload Plugin A">&#10005;</button>
+        </div>
+        <div class="slot-strip slot-b-strip">
+          <span class="comparison-badge badge-b">B</span>
+          <span class="slot-name" id="slot-b-name">No plugin assigned</span>
+          <button class="slot-unload" id="slot-b-unload" onclick="onUnloadSlot('B')" title="Unload Plugin B">&#10005;</button>
+        </div>
+      </div>
 
       <!-- Plugin browser (shown when no plugin UI overlay is active) -->
       <div id="plugin-browser">
@@ -1120,6 +1219,9 @@
   /* ================================================================
      COMPARISON (comparison)
   ================================================================ */
+  var loadedPluginNameA = null;   // name of plugin in Slot A (mirrors Plugin A in processor)
+  var loadedPluginNameB = null;   // name of plugin in Slot B
+
   function onComparisonChange(value) {
     var index = parseInt(value, 10);
     state.comparison = index;
@@ -1129,7 +1231,11 @@
 
   function applyComparisonUI(index) {
     var abBadges = document.getElementById('ab-badges');
-    var legend = document.getElementById('comparison-legend');
+    var legend   = document.getElementById('comparison-legend');
+    var abSlots  = document.getElementById('ab-slots');
+    var singleHdr = document.getElementById('single-plugin-header');
+    var isAB     = (index === 1);
+
     if (index !== 0) {
       abBadges.classList.add('visible');
       legend.classList.remove('hidden');
@@ -1138,6 +1244,80 @@
       abBadges.classList.remove('visible');
       legend.classList.add('hidden');
       drawGraph(tabKeys[state.analysisType], false);
+    }
+
+    // Show A/B slot strips only in A/B Plugins mode
+    if (isAB) {
+      abSlots.classList.add('visible');
+      singleHdr.style.display = 'none';
+      // Re-render plugin list with A/B assign buttons
+      renderPluginList(allPlugins);
+    } else {
+      abSlots.classList.remove('visible');
+      singleHdr.style.display = '';
+      // Re-render plugin list in normal mode
+      renderPluginList(allPlugins);
+    }
+  }
+
+  /* ---- Slot name helpers ---- */
+  function setSlotA(name, cssState) {
+    var el  = document.getElementById('slot-a-name');
+    var btn = document.getElementById('slot-a-unload');
+    el.textContent = name || 'No plugin assigned';
+    el.className = 'slot-name' + (cssState ? ' ' + cssState : '');
+    if (btn) btn.className = 'slot-unload' + (cssState === 'active' ? ' visible' : '');
+  }
+
+  function setSlotB(name, cssState) {
+    var el  = document.getElementById('slot-b-name');
+    var btn = document.getElementById('slot-b-unload');
+    el.textContent = name || 'No plugin assigned';
+    el.className = 'slot-name' + (cssState ? ' ' + cssState : '');
+    if (btn) btn.className = 'slot-unload' + (cssState === 'active' ? ' visible' : '');
+  }
+
+  /* ---- Plugin B event handlers (called by C++) ---- */
+  function handlePluginBLoading(name) {
+    loadedPluginNameB = null;
+    setSlotB('Loading ' + name + '\u2026', 'loading');
+  }
+
+  function handlePluginBLoaded(name) {
+    loadedPluginNameB = name;
+    setSlotB(name, 'active');
+  }
+
+  function handlePluginBLoadError(error) {
+    loadedPluginNameB = null;
+    setSlotB(error, 'error');
+    setTimeout(function() { setSlotB(null, ''); }, 8000);
+  }
+
+  function handlePluginBUnloaded() {
+    loadedPluginNameB = null;
+    setSlotB(null, '');
+  }
+
+  /* ---- Assign / unload from A/B slots ---- */
+  function onAssignPlugin(pluginIndex, slot) {
+    var plugin = allPlugins.find(function(p) { return p.index === pluginIndex; });
+    if (!plugin) return;
+
+    if (slot === 'A') {
+      handlePluginLoading(plugin.name);   // reuse existing handler — updates Slot A label
+      callNative('loadPluginRequested', { pluginIndex: pluginIndex });
+    } else {
+      handlePluginBLoading(plugin.name);
+      callNative('loadPluginBRequested', { pluginIndex: pluginIndex });
+    }
+  }
+
+  function onUnloadSlot(slot) {
+    if (slot === 'A') {
+      callNative('unloadPluginRequested', {});
+    } else {
+      callNative('unloadPluginBRequested', {});
     }
   }
 
@@ -1315,23 +1495,35 @@
   function dbToY(db, H) { return H * (1 - (db + 18) / 36); }
 
   function drawFrequencyCurve(W, H, lineColor, fillTop, fillBottom, offset) {
+    var src = offset ? snapshotFreqData : liveFreqData;
     var points = [];
-    for (var i = 0; i <= 300; i++) {
-      var t = i / 300;
-      var f = Math.pow(10, 1.301 + t * 2.999);
-      var db = shelfCurve(f);
-      if (offset) db += 1.2;
-      points.push([t * W, dbToY(db, H)]);
+    if (src && src.length > 0) {
+      for (var i = 0; i < src.length; i++)
+        points.push([freqToX(src[i][0], W), dbToY(src[i][1], H)]);
+    } else {
+      for (var i = 0; i <= 300; i++) {
+        var t = i / 300;
+        var f = Math.pow(10, 1.301 + t * 2.999);
+        var db = shelfCurve(f);
+        if (offset) db += 1.2;
+        points.push([t * W, dbToY(db, H)]);
+      }
     }
     drawCurveWithFill(points, lineColor, fillTop, fillBottom, W, H);
   }
 
   function drawFrequencyCurveB(W, H, lineColor, fillTop, fillBottom) {
+    var src = snapshotFreqData;
     var points = [];
-    for (var i = 0; i <= 300; i++) {
-      var t = i / 300;
-      var f = Math.pow(10, 1.301 + t * 2.999);
-      points.push([t * W, dbToY(shelfCurveB(f), H)]);
+    if (src && src.length > 0) {
+      for (var i = 0; i < src.length; i++)
+        points.push([freqToX(src[i][0], W), dbToY(src[i][1], H)]);
+    } else {
+      for (var i = 0; i <= 300; i++) {
+        var t = i / 300;
+        var f = Math.pow(10, 1.301 + t * 2.999);
+        points.push([t * W, dbToY(shelfCurveB(f), H)]);
+      }
     }
     ctx.globalAlpha = 0.85;
     drawCurveWithFill(points, lineColor, fillTop, fillBottom, W, H);
@@ -1368,16 +1560,29 @@
   }
 
   function drawDynamicsCurve(W, H, color, offset) {
+    var realPts = dynamicsData && dynamicsData.points && dynamicsData.points.length > 0
+                  ? dynamicsData.points : null;
     var points = [];
-    for (var i = 0; i <= 200; i++) {
-      var t = i / 200;
-      var inputDb = -60 + t * 60;
-      var outputDb = dynamicsShape(inputDb, offset);
-      points.push([t * W, H - (outputDb + 60) / 60 * H]);
+    if (realPts && !offset) {
+      // Real data: [[input_db, output_db], ...], range -60..0
+      for (var i = 0; i < realPts.length; i++) {
+        var xi = (realPts[i][0] + 60) / 60 * W;
+        var yi = H - (realPts[i][1] + 60) / 60 * H;
+        points.push([xi, yi]);
+      }
+    } else {
+      for (var i = 0; i <= 200; i++) {
+        var t = i / 200;
+        var inputDb = -60 + t * 60;
+        var outputDb = dynamicsShape(inputDb, offset);
+        points.push([t * W, H - (outputDb + 60) / 60 * H]);
+      }
     }
+    // Unity-gain diagonal
     ctx.strokeStyle = '#3C3C3E'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
     ctx.beginPath(); ctx.moveTo(0, H); ctx.lineTo(W, 0); ctx.stroke();
     ctx.setLineDash([]);
+    if (!points.length) return;
     ctx.beginPath(); ctx.moveTo(points[0][0], points[0][1]);
     for (var i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
     ctx.strokeStyle = color; ctx.lineWidth = 1.8;
@@ -1392,8 +1597,15 @@
   }
 
   function drawDistortionBars(W, H) {
-    var harmonics  = [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000];
-    var amplitudes = [1.0, 0.09, 0.03, 0.015, 0.008, 0.004, 0.003, 0.002];
+    var harmonics, amplitudes;
+    if (thdData && thdData.harmonics && thdData.harmonics.length > 0) {
+      harmonics  = thdData.harmonics.map(function(h) { return h[0]; });
+      amplitudes = thdData.harmonics.map(function(h) { return h[1]; });
+    } else {
+      // Demo fallback
+      harmonics  = [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000];
+      amplitudes = [1.0, 0.09, 0.03, 0.015, 0.008, 0.004, 0.003, 0.002];
+    }
     var barW = W * 0.006;
     harmonics.forEach(function(f, idx) {
       var x = freqToX(f, W);
@@ -1407,15 +1619,28 @@
       }
       ctx.fillStyle = grad; ctx.fillRect(x - barW / 2, y, barW, barH);
     });
+    // THD % label
+    if (thdData && thdData.percent > 0) {
+      ctx.fillStyle = '#8E8E93';
+      ctx.font = '11px Inter, system-ui, sans-serif';
+      ctx.fillText('THD: ' + (thdData.percent * 100).toFixed(3) + '%', 8, 16);
+    }
   }
 
   function drawPhaseCurve(W, H, color, offset) {
+    var src = phaseData;
     var points = [];
-    for (var i = 0; i <= 300; i++) {
-      var t = i / 300;
-      var f = Math.pow(10, 1.301 + t * 2.999);
-      var phase = phaseCurveShape(f, offset);
-      points.push([t * W, H * (1 - (phase + 180) / 360)]);
+    if (src && src.length > 0 && !offset) {
+      // Real data: [[freq_hz, degrees], ...]
+      for (var i = 0; i < src.length; i++)
+        points.push([freqToX(src[i][0], W), H * (1 - (src[i][1] + 180) / 360)]);
+    } else {
+      for (var i = 0; i <= 300; i++) {
+        var t = i / 300;
+        var f = Math.pow(10, 1.301 + t * 2.999);
+        var phase = phaseCurveShape(f, offset);
+        points.push([t * W, H * (1 - (phase + 180) / 360)]);
+      }
     }
     ctx.beginPath(); ctx.moveTo(points[0][0], points[0][1]);
     for (var i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
@@ -1431,14 +1656,44 @@
   }
 
   function drawLatencyBar(W, H) {
-    var barH = 3, y = H * 0.3, barLen = W * 0.18;
-    var grad = ctx.createLinearGradient(0, 0, barLen, 0);
-    grad.addColorStop(0, '#0A84FF'); grad.addColorStop(1, 'rgba(10,132,255,0.5)');
-    ctx.fillStyle = grad; ctx.fillRect(0, y, barLen, barH);
-    ctx.fillStyle = '#8E8E93'; ctx.font = '11px Inter, system-ui, sans-serif';
-    ctx.fillText('Reported latency: 256 samples (5.8 ms @ 44.1 kHz)', barLen + 10, y + barH * 0.5 + 4);
-    ctx.fillStyle = '#0A84FF'; ctx.font = '10px SF Mono, Menlo, monospace';
-    ctx.fillText('256 smp', barLen + 10, y + barH * 0.5 + 18);
+    var latA, latB, msA, msB;
+    if (latencyData) {
+      latA = latencyData.methodA;  latB = latencyData.methodB;
+      msA  = latencyData.msA;      msB  = latencyData.msB;
+    } else {
+      latA = -1; latB = -1; msA = 0; msB = 0;
+    }
+
+    if (latA < 0 && latB < 0) {
+      ctx.fillStyle = '#636366';
+      ctx.font = '12px Inter, system-ui, sans-serif';
+      ctx.fillText('No latency data — load a plugin and click Analyze', 12, H * 0.35);
+      return;
+    }
+
+    var maxSamples = Math.max(latA, latB, 1);
+    var barH = 4, barY = H * 0.28;
+
+    if (latA >= 0) {
+      var lenA = (latA / maxSamples) * W * 0.65;
+      var gA = ctx.createLinearGradient(0, 0, lenA, 0);
+      gA.addColorStop(0, '#0A84FF'); gA.addColorStop(1, 'rgba(10,132,255,0.45)');
+      ctx.fillStyle = gA; ctx.fillRect(0, barY, lenA, barH);
+      ctx.fillStyle = '#8E8E93'; ctx.font = '11px Inter, system-ui, sans-serif';
+      ctx.fillText('Method A (reported): ' + latA + ' samples (' + msA.toFixed(2) + ' ms)',
+                   lenA + 10, barY + barH + 3);
+    }
+
+    if (latB >= 0) {
+      var barYB = barY + 30;
+      var lenB = (latB / maxSamples) * W * 0.65;
+      var gB = ctx.createLinearGradient(0, 0, lenB, 0);
+      gB.addColorStop(0, '#FF9F0A'); gB.addColorStop(1, 'rgba(255,159,10,0.45)');
+      ctx.fillStyle = gB; ctx.fillRect(0, barYB, lenB, barH);
+      ctx.fillStyle = '#8E8E93'; ctx.font = '11px Inter, system-ui, sans-serif';
+      ctx.fillText('Method B (empirical): ' + latB + ' samples (' + msB.toFixed(2) + ' ms)',
+                   lenB + 10, barYB + barH + 3);
+    }
   }
 
   /* ================================================================
@@ -1469,6 +1724,67 @@
   ================================================================ */
   var allPlugins = [];  // full list from last scan
 
+  /* ================================================================
+     MEASUREMENT DATA — populated by C++ timerCallback() via evaluateJavascript()
+     Each variable is null until the first data push arrives.
+  ================================================================ */
+  var liveFreqData     = null;  // [[freq_hz, db], ...] 256 log-spaced points
+  var snapshotFreqData = null;  // [[freq_hz, db], ...] before-snapshot points
+  var thdData          = null;  // {percent: float, harmonics: [[hz, amp], ...]}
+  var phaseData        = null;  // [[freq_hz, degrees], ...] 256 points
+  var dynamicsData     = null;  // {running: bool, progress: int, points: [[in_db, out_db], ...]}
+  var latencyData      = null;  // {methodA: int, methodB: int, msA: float, msB: float}
+
+  /* ================================================================
+     DATA BRIDGE HANDLERS — called by C++ via evaluateJavascript()
+  ================================================================ */
+  function handleFreqResponse(data) {
+    liveFreqData = data;
+    if (tabKeys[state.analysisType] === 'frequency')
+      drawGraph('frequency', state.comparison !== 0);
+  }
+
+  function handleSnapshotFreqResponse(data) {
+    snapshotFreqData = data;
+    if (tabKeys[state.analysisType] === 'frequency')
+      drawGraph('frequency', state.comparison !== 0);
+  }
+
+  function handleThdResult(data) {
+    thdData = data;
+    if (tabKeys[state.analysisType] === 'distortion')
+      drawGraph('distortion', false);
+  }
+
+  function handlePhaseResponse(data) {
+    phaseData = data;
+    if (tabKeys[state.analysisType] === 'phase')
+      drawGraph('phase', state.comparison !== 0);
+  }
+
+  function handleDynamicsResult(data) {
+    dynamicsData = data;
+    if (tabKeys[state.analysisType] === 'dynamics')
+      drawGraph('dynamics', state.comparison !== 0);
+    // Drive analyze button text during sweep
+    var btn = document.getElementById('btn-analyze');
+    if (btn && data) {
+      if (data.running) {
+        btn.textContent = 'Sweep ' + data.progress + '%';
+        btn.style.background = '#FF9F0A';
+      } else if (btn.textContent.indexOf('Sweep') !== -1) {
+        btn.innerHTML = '<span class="play-icon">&#9654;</span> Analyze';
+        btn.style.background = '';
+      }
+    }
+  }
+
+  function handleLatencyResult(data) {
+    latencyData = data;
+    if (tabKeys[state.analysisType] === 'latency')
+      drawGraph('latency', false);
+  }
+
   // Called by C++: handlePluginListUpdate(jsonArray)
   function handlePluginListUpdate(plugins) {
     allPlugins = plugins || [];
@@ -1498,6 +1814,10 @@
   // Called by C++: handlePluginLoading(name)
   function handlePluginLoading(name) {
     setPluginNameDisplay('Loading ' + name + '\u2026', 'loading');
+    if (state.comparison === 1) {
+      setSlotA('Loading ' + name + '\u2026', 'loading');
+      return;  // don't replace the plugin list in A/B mode
+    }
     document.getElementById('plugin-list').innerHTML =
       '<div class="plugin-list-empty">Loading ' + escapeHtml(name) + '\u2026</div>';
     // Start a JS-side timeout: if no loaded/error within 8 seconds, show hint
@@ -1517,10 +1837,17 @@
   // Called by C++: handlePluginLoaded(name)
   function handlePluginLoaded(name) {
     clearTimeout(window._pluginLoadTimer);
+    loadedPluginNameA = name;
     setPluginNameDisplay(name, 'active');
-    document.getElementById('plugin-list').innerHTML =
-      '<div class="plugin-list-empty" style="color:var(--green)">\u2713 ' + escapeHtml(name) + ' loaded<br><br>'
-      + '<span style="color:var(--text-muted);font-size:11px">See floating window for plugin UI.<br>Click Rescan to browse again.</span></div>';
+    // In A/B mode, update slot A strip and re-render the list
+    if (state.comparison === 1) {
+      setSlotA(name, 'active');
+      renderPluginList(allPlugins);
+    } else {
+      document.getElementById('plugin-list').innerHTML =
+        '<div class="plugin-list-empty" style="color:var(--green)">\u2713 ' + escapeHtml(name) + ' loaded<br><br>'
+        + '<span style="color:var(--text-muted);font-size:11px">See floating window for plugin UI.<br>Click Rescan to browse again.</span></div>';
+    }
   }
 
   // Called by C++: handlePluginLoadError(error)
@@ -1535,7 +1862,9 @@
 
   // Called by C++: handlePluginUnloaded()
   function handlePluginUnloaded() {
+    loadedPluginNameA = null;
     setPluginNameDisplay('No plugin loaded', '');
+    if (state.comparison === 1) setSlotA(null, '');
     renderPluginList(allPlugins);
   }
 
@@ -1545,7 +1874,18 @@
       list.innerHTML = '<div class="plugin-list-empty">No plugins found.<br>Click Scan to search.</div>';
       return;
     }
+    var isAB = (state.comparison === 1);
     list.innerHTML = plugins.map(function(p) {
+      if (isAB) {
+        return '<div class="plugin-list-item ab-item">' +
+               '<span class="item-name">' + escapeHtml(p.name) + '</span>' +
+               '<span class="item-format">' + escapeHtml(p.format) + '</span>' +
+               '<div class="ab-assign-btns">' +
+               '<button class="assign-btn assign-a" onclick="onAssignPlugin(' + p.index + ',\'A\')">\u2192A</button>' +
+               '<button class="assign-btn assign-b" onclick="onAssignPlugin(' + p.index + ',\'B\')">\u2192B</button>' +
+               '</div>' +
+               '</div>';
+      }
       return '<div class="plugin-list-item" onclick="onSelectPlugin(' + p.index + ')">' +
              '<span class="item-name">' + escapeHtml(p.name) + '</span>' +
              '<span class="item-format">' + escapeHtml(p.format) + '</span>' +
@@ -1610,19 +1950,40 @@
   ================================================================ */
   function onAnalyze() {
     var btn = document.getElementById('btn-analyze');
-    btn.textContent = 'Running\u2026';
-    btn.style.background = '#30D158';
-    setTimeout(function() {
-      btn.innerHTML = '<span class="play-icon">&#9654;</span> Analyze';
-      btn.style.background = '';
-      drawGraph(tabKeys[state.analysisType] || 'frequency', state.comparison !== 0);
-    }, 800);
-    // Notify C++ that analyze was triggered
+    var tab = tabKeys[state.analysisType] || 'frequency';
+    // Dynamics sweep takes ~8 s — progress driven by handleDynamicsResult()
+    if (tab === 'dynamics') {
+      dynamicsData = null;
+      btn.textContent = 'Starting\u2026';
+      btn.style.background = '#FF9F0A';
+    } else if (tab === 'latency') {
+      // Trigger impulse via dedicated handler
+      callNative('triggerLatencyRequested', {});
+      btn.textContent = 'Measuring\u2026';
+      btn.style.background = '#FF9F0A';
+      setTimeout(function() {
+        btn.innerHTML = '<span class="play-icon">&#9654;</span> Analyze';
+        btn.style.background = '';
+      }, 3000);
+      return;
+    } else {
+      btn.textContent = 'Running\u2026';
+      btn.style.background = '#30D158';
+      // Restore button after brief visual feedback (data arrives via timer)
+      setTimeout(function() {
+        btn.innerHTML = '<span class="play-icon">&#9654;</span> Analyze';
+        btn.style.background = '';
+      }, 800);
+    }
     callNative('analyzeRequested', {
       testSignal: state.testSignal,
       analysisType: state.analysisType,
       analysisMode: state.analysisMode
     });
+  }
+
+  function onSnapshot() {
+    callNative('snapshotRequested', {});
   }
 
   function onExport() {

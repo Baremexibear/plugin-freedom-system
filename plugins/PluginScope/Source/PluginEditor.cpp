@@ -75,6 +75,28 @@ PluginScopeAudioProcessorEditor::PluginScopeAudioProcessorEditor (PluginScopeAud
                       completion ("ok");
                   })
               .withNativeFunction (
+                  "loadPluginBRequested",
+                  [this] (const juce::Array<juce::var>& args,
+                          juce::WebBrowserComponent::NativeFunctionCompletion completion)
+                  {
+                      juce::var data = args.size() > 0 ? args[0] : juce::var (new juce::DynamicObject());
+                      if (auto* obj = data.getDynamicObject())
+                          obj->setProperty ("type", "loadPluginBRequested");
+                      handleNativeEvent (data);
+                      completion ("ok");
+                  })
+              .withNativeFunction (
+                  "unloadPluginBRequested",
+                  [this] (const juce::Array<juce::var>& args,
+                          juce::WebBrowserComponent::NativeFunctionCompletion completion)
+                  {
+                      juce::var data = args.size() > 0 ? args[0] : juce::var (new juce::DynamicObject());
+                      if (auto* obj = data.getDynamicObject())
+                          obj->setProperty ("type", "unloadPluginBRequested");
+                      handleNativeEvent (data);
+                      completion ("ok");
+                  })
+              .withNativeFunction (
                   "scanPluginsRequested",
                   [this] (const juce::Array<juce::var>& args,
                           juce::WebBrowserComponent::NativeFunctionCompletion completion)
@@ -93,6 +115,28 @@ PluginScopeAudioProcessorEditor::PluginScopeAudioProcessorEditor (PluginScopeAud
                       juce::var data = args.size() > 0 ? args[0] : juce::var (new juce::DynamicObject());
                       if (auto* obj = data.getDynamicObject())
                           obj->setProperty ("type", "exportRequested");
+                      handleNativeEvent (data);
+                      completion ("ok");
+                  })
+              .withNativeFunction (
+                  "snapshotRequested",
+                  [this] (const juce::Array<juce::var>& args,
+                          juce::WebBrowserComponent::NativeFunctionCompletion completion)
+                  {
+                      juce::var data = args.size() > 0 ? args[0] : juce::var (new juce::DynamicObject());
+                      if (auto* obj = data.getDynamicObject())
+                          obj->setProperty ("type", "snapshotRequested");
+                      handleNativeEvent (data);
+                      completion ("ok");
+                  })
+              .withNativeFunction (
+                  "triggerLatencyRequested",
+                  [this] (const juce::Array<juce::var>& args,
+                          juce::WebBrowserComponent::NativeFunctionCompletion completion)
+                  {
+                      juce::var data = args.size() > 0 ? args[0] : juce::var (new juce::DynamicObject());
+                      if (auto* obj = data.getDynamicObject())
+                          obj->setProperty ("type", "triggerLatencyRequested");
                       handleNativeEvent (data);
                       completion ("ok");
                   })
@@ -161,16 +205,25 @@ PluginScopeAudioProcessorEditor::PluginScopeAudioProcessorEditor (PluginScopeAud
 
     // Populate plugin list if scan already completed
     pushPluginListToWebView();
+
+    // Start polling timer — pushes measurement data to WebView JS at ~30 Hz
+    startTimer (33);
 }
 
 //==============================================================================
 PluginScopeAudioProcessorEditor::~PluginScopeAudioProcessorEditor()
 {
+    // Stop timer first — prevents timerCallback() running during teardown
+    stopTimer();
+
     // Stop listening for scan updates before any members are destroyed
     processorRef.scanBroadcaster.removeChangeListener (this);
 
     // Remove hosted editor before unique_ptr destructs it
     removeHostedEditor();
+
+    // Remove Plugin B editor before unique_ptr destructs it
+    removeHostedEditorB();
 
     // Member destruction order (reverse of declaration):
     //   comparisonAttachment, testSignalAttachment, analysisTypeAttachment,
@@ -499,6 +552,72 @@ void PluginScopeAudioProcessorEditor::handleNativeEvent (const juce::var& eventD
             webView->evaluateJavascript (js, [] (juce::WebBrowserComponent::EvaluationResult) {});
         }
     }
+    else if (type == "loadPluginBRequested")
+    {
+        auto pluginIndexVar = obj->getProperty ("pluginIndex");
+        if (! (pluginIndexVar.isInt() || pluginIndexVar.isDouble()))
+            return;
+
+        const int pluginIndex = static_cast<int> (pluginIndexVar);
+        if (pluginIndex < 0 || pluginIndex >= knownDescs.size())
+            return;
+
+        const auto desc = knownDescs[pluginIndex];
+        removeHostedEditorB();
+
+        if (webView != nullptr)
+        {
+            juce::String js = "if(typeof handlePluginBLoading==='function')"
+                              "handlePluginBLoading(\""
+                              + desc.name.replace ("\"", "\\\"") + "\");";
+            webView->evaluateJavascript (js, [] (juce::WebBrowserComponent::EvaluationResult) {});
+        }
+
+        auto sentinel = processorRef.processorAlive;
+
+        processorRef.loadPluginB (desc, [this, name = desc.name, sentinel]
+            (bool success, const juce::String& error)
+        {
+            if (! sentinel->load()) return;
+
+            if (success)
+            {
+                if (webView != nullptr)
+                {
+                    juce::String js = "if(typeof handlePluginBLoaded==='function')"
+                                      "handlePluginBLoaded(\""
+                                      + name.replace ("\"", "\\\"") + "\");";
+                    webView->evaluateJavascript (js, [] (juce::WebBrowserComponent::EvaluationResult) {});
+                }
+
+                juce::MessageManager::callAsync ([this, sentinel]
+                {
+                    if (sentinel->load()) embedHostedEditorB();
+                });
+            }
+            else
+            {
+                if (webView != nullptr)
+                {
+                    juce::String js = "if(typeof handlePluginBLoadError==='function')"
+                                      "handlePluginBLoadError(\""
+                                      + error.replace ("\"", "\\\"") + "\");";
+                    webView->evaluateJavascript (js, [] (juce::WebBrowserComponent::EvaluationResult) {});
+                }
+            }
+        });
+    }
+    else if (type == "unloadPluginBRequested")
+    {
+        processorRef.unloadPluginB();
+        removeHostedEditorB();
+
+        if (webView != nullptr)
+        {
+            juce::String js = "if(typeof handlePluginBUnloaded==='function')handlePluginBUnloaded();";
+            webView->evaluateJavascript (js, [] (juce::WebBrowserComponent::EvaluationResult) {});
+        }
+    }
     else if (type == "scanPluginsRequested")
     {
         juce::Logger::writeToLog ("[PluginScope] scanPluginsRequested received from WebView");
@@ -514,6 +633,16 @@ void PluginScopeAudioProcessorEditor::handleNativeEvent (const juce::var& eventD
         processorRef.scanScannedCount.store (0);
         processorRef.scanComplete.store (false);
         processorRef.startPluginScan();
+    }
+    else if (type == "snapshotRequested")
+    {
+        processorRef.takeSnapshot();
+        juce::Logger::writeToLog ("[PluginScope] snapshotRequested — snapshot taken");
+    }
+    else if (type == "triggerLatencyRequested")
+    {
+        processorRef.triggerLatencyMeasurement();
+        juce::Logger::writeToLog ("[PluginScope] triggerLatencyRequested — impulse pending");
     }
     else if (type == "exportRequested")
     {
@@ -585,4 +714,207 @@ void PluginScopeAudioProcessorEditor::removeHostedEditor()
     }
 
     hostedPluginEditor.reset();
+}
+
+//==============================================================================
+void PluginScopeAudioProcessorEditor::embedHostedEditorB()
+{
+    jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
+
+    removeHostedEditorB();
+
+    auto* pluginB = processorRef.getHostedPluginB();
+    if (pluginB == nullptr || !pluginB->hasEditor())
+        return;
+
+    hostedPluginEditorB.reset (pluginB->createEditor());
+    if (hostedPluginEditorB == nullptr)
+        return;
+
+    hostedEditorWindowB = std::make_unique<HostedEditorWindow> (
+        pluginB->getName() + " [B]", hostedPluginEditorB.get());
+
+    hostedEditorWindowB->onClose = [this]
+    {
+        processorRef.unloadPluginB();
+        hostedEditorWindowB.reset();
+        hostedPluginEditorB.reset();
+
+        if (webView != nullptr)
+            webView->evaluateJavascript (
+                "if(typeof handlePluginBUnloaded==='function')handlePluginBUnloaded();",
+                [] (juce::WebBrowserComponent::EvaluationResult) {});
+    };
+}
+
+//==============================================================================
+void PluginScopeAudioProcessorEditor::removeHostedEditorB()
+{
+    if (hostedEditorWindowB != nullptr)
+    {
+        hostedEditorWindowB->onClose = nullptr;
+        hostedEditorWindowB->setVisible (false);
+        hostedEditorWindowB.reset();
+    }
+
+    hostedPluginEditorB.reset();
+}
+
+//==============================================================================
+// timerCallback — fires at ~30 Hz on the message thread.
+//
+// Reads measurement results from the processor and pushes compact JSON to the
+// WebView via evaluateJavascript().  All draw calls happen inside JS handlers
+// (handleFreqResponse, handleThdResult, handlePhaseResponse,
+//  handleDynamicsResult, handleLatencyResult) defined in index.html.
+//
+// Data rates:
+//   Freq response  — every tick (live chart, ~30 Hz)
+//   Snapshot freq  — every tick when snapshot exists
+//   Dynamics       — every tick while sweep running; every 500 ms otherwise
+//   THD / Phase / Latency — every 500 ms (15 ticks × 33 ms)
+//==============================================================================
+void PluginScopeAudioProcessorEditor::timerCallback()
+{
+    if (webView == nullptr)
+        return;
+
+    ++timerTick;
+
+    // Fire-and-forget JS evaluation helper
+    auto call = [this] (const juce::String& js)
+    {
+        webView->evaluateJavascript (js, [] (juce::WebBrowserComponent::EvaluationResult) {});
+    };
+
+    // Build compact [[freq_hz, value], ...] JSON log-spaced across 20-20000 Hz.
+    // Uses binary search on the source vector (sorted ascending by .first = Hz).
+    auto logSpacedJson = [] (const std::vector<std::pair<float,float>>& data, int n) -> juce::String
+    {
+        if (data.empty()) return "null";
+
+        const float minL = std::log10 (20.0f);
+        const float maxL = std::log10 (20000.0f);
+        juce::String j ("[");
+        bool firstPt = true;
+
+        for (int i = 0; i < n; ++i)
+        {
+            const float f  = std::pow (10.0f, minL + (maxL - minL) * i / (n - 1));
+            int lo = 0, hi = (int) data.size() - 1;
+
+            while (lo < hi)
+            {
+                const int mid = (lo + hi) / 2;
+                if (data[mid].first < f) lo = mid + 1;
+                else                     hi = mid;
+            }
+
+            if (!firstPt) j += ",";
+            j += "[" + juce::String (f,             0)
+               + "," + juce::String (data[lo].second, 2) + "]";
+            firstPt = false;
+        }
+
+        return j + "]";
+    };
+
+    // === Frequency Response (live — every tick) =============================
+    {
+        const auto d = processorRef.getFreqResponse();
+        if (!d.empty())
+            call ("if(typeof handleFreqResponse==='function')"
+                  "handleFreqResponse(" + logSpacedJson (d, 256) + ");");
+    }
+
+    // === Snapshot Frequency Response (every tick while snapshot exists) =====
+    if (processorRef.getHasSnapshot())
+    {
+        const auto d = processorRef.getSnapshotFreqResponse();
+        if (!d.empty())
+            call ("if(typeof handleSnapshotFreqResponse==='function')"
+                  "handleSnapshotFreqResponse(" + logSpacedJson (d, 256) + ");");
+    }
+
+    // === Dynamics (every tick while running; every 500 ms at rest) ===========
+    const bool dynRunning = processorRef.isDynamicsSweepRunning();
+    const bool slowTick   = (timerTick % 15 == 0);
+
+    if (dynRunning || slowTick)
+    {
+        const auto  pts  = processorRef.getDynamicsResult();
+        const int   prog = processorRef.getDynamicsSweepProgress();
+
+        if (!pts.empty() || dynRunning)
+        {
+            juce::String j ("{\"running\":"   + juce::String (dynRunning ? "true" : "false")
+                          + ",\"progress\":"  + juce::String (prog)
+                          + ",\"points\":[");
+            bool firstPt = true;
+
+            for (const auto& p : pts)
+            {
+                if (!firstPt) j += ",";
+                j += "[" + juce::String (p.first,  1)
+                   + "," + juce::String (p.second, 1) + "]";
+                firstPt = false;
+            }
+
+            j += "]}";
+            call ("if(typeof handleDynamicsResult==='function')handleDynamicsResult(" + j + ");");
+        }
+    }
+
+    // === Slow measurements (every ~500 ms) ===================================
+    if (slowTick)
+    {
+        // THD
+        {
+            const auto  h   = processorRef.getThdHarmonics();
+            const float pct = processorRef.getThdPercent();
+
+            if (!h.empty())
+            {
+                juce::String j ("{\"percent\":" + juce::String (pct, 4)
+                              + ",\"harmonics\":[");
+                bool firstPt = true;
+
+                for (const auto& p : h)
+                {
+                    if (!firstPt) j += ",";
+                    j += "[" + juce::String ((int) p.first)
+                       + "," + juce::String (p.second, 6) + "]";
+                    firstPt = false;
+                }
+
+                j += "]}";
+                call ("if(typeof handleThdResult==='function')handleThdResult(" + j + ");");
+            }
+        }
+
+        // Phase Response
+        {
+            const auto d = processorRef.getPhaseResponse();
+            if (!d.empty())
+                call ("if(typeof handlePhaseResponse==='function')"
+                      "handlePhaseResponse(" + logSpacedJson (d, 256) + ");");
+        }
+
+        // Latency
+        {
+            const int   latA = processorRef.getLatencyMethodA();
+            const int   latB = processorRef.getLatencyMethodB();
+
+            if (latA >= 0 || latB >= 0)
+            {
+                const juce::String j (
+                    "{\"methodA\":" + juce::String (latA)
+                  + ",\"methodB\":" + juce::String (latB)
+                  + ",\"msA\":"     + juce::String (processorRef.getLatencyMsA(), 2)
+                  + ",\"msB\":"     + juce::String (processorRef.getLatencyMsB(), 2)
+                  + "}");
+                call ("if(typeof handleLatencyResult==='function')handleLatencyResult(" + j + ");");
+            }
+        }
+    }
 }

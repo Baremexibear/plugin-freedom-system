@@ -1789,6 +1789,57 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 }
 
 //==============================================================================
+// resolveVST3Description
+//
+// Our safe scanner reads metadata only (no DLL load).  For VST3 plugins that
+// ship moduleinfo.json (VST3 3.7+) the scanner computes the correct
+// uniqueId/deprecatedUid.  Older plugins (no moduleinfo.json) fall back to
+// Info.plist; their IDs are set to name.hashCode() which does NOT match
+// JUCE's polynomial hash of the factory TUID — causing
+// findClassMatchingDescription() to silently reject every class and return
+// "Unable to load VST-3 plug-in file".
+//
+// Fix: at load time (user has clicked Load — not during bulk scan), ask the
+// VST3 format to open the bundle and return fresh PluginDescriptions.  These
+// come directly from the factory and have correct IDs.  We then match by name
+// and substitute the scanned description.
+//
+// The DLL is already going to be opened by createPluginInstanceAsync(); JUCE's
+// RefCountedDllHandle cache means the bundle is only dlopen'd once.
+//
+static juce::PluginDescription resolveVST3Description (
+    juce::AudioPluginFormatManager& mgr,
+    const juce::PluginDescription& desc)
+{
+    if (desc.pluginFormatName != "VST3")
+        return desc;
+
+    for (auto* fmt : mgr.getFormats())
+    {
+        if (fmt->getName() != "VST3") continue;
+
+        juce::OwnedArray<juce::PluginDescription> fresh;
+        fmt->findAllTypesForFile (fresh, desc.fileOrIdentifier);
+
+        for (auto* d : fresh)
+        {
+            if (d->name.trim() == desc.name.trim())
+            {
+                juce::Logger::writeToLog ("[PluginScope] resolved VST3 IDs for \""
+                    + desc.name + "\": uniqueId=" + juce::String (d->uniqueId)
+                    + " deprecatedUid=" + juce::String (d->deprecatedUid));
+                return *d;
+            }
+        }
+        break;
+    }
+
+    juce::Logger::writeToLog ("[PluginScope] WARNING: could not resolve VST3 IDs for \""
+        + desc.name + "\" — loading with scanned description");
+    return desc;
+}
+
+//==============================================================================
 void PluginScopeAudioProcessor::loadPlugin (
     const juce::PluginDescription& desc,
     std::function<void(bool success, const juce::String& error)> callback)
@@ -1824,9 +1875,14 @@ void PluginScopeAudioProcessor::loadPlugin (
     }
    #endif
 
+    // Resolve the description: for VST3 plugins without moduleinfo.json our
+    // safe scanner cannot compute the correct uniqueId/deprecatedUid.  Query
+    // the actual factory now (single DLL open, cached by JUCE internally).
+    const auto resolvedDesc = resolveVST3Description (formatManager, desc);
+
     // Load the new plugin asynchronously — required for AUv3 plugins
     formatManager.createPluginInstanceAsync (
-        desc,
+        resolvedDesc,
         currentSampleRate,
         currentBlockSize,
         [this, callback, descName = desc.name, descFmt = desc.pluginFormatName]
@@ -1903,8 +1959,10 @@ void PluginScopeAudioProcessor::loadPluginB (
         hostedPluginB.reset();
     }
 
+    const auto resolvedDescB = resolveVST3Description (formatManager, desc);
+
     formatManager.createPluginInstanceAsync (
-        desc,
+        resolvedDescB,
         currentSampleRate,
         currentBlockSize,
         [this, callback] (std::unique_ptr<juce::AudioPluginInstance> instance,

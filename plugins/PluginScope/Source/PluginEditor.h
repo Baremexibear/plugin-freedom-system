@@ -60,7 +60,8 @@ private:
 };
 
 class PluginScopeAudioProcessorEditor : public juce::AudioProcessorEditor,
-                                        public juce::ChangeListener
+                                        public juce::ChangeListener,
+                                        public juce::Timer
 {
 public:
     explicit PluginScopeAudioProcessorEditor (PluginScopeAudioProcessor&);
@@ -73,6 +74,10 @@ public:
     //==========================================================================
     // ChangeListener — called by scanBroadcaster when scan progress changes
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
+
+    //==========================================================================
+    // Timer — polls C++ measurement results and pushes JSON to WebView JS
+    void timerCallback() override;
 
     //==========================================================================
     // Called to push the current plugin list to the WebView JavaScript
@@ -89,6 +94,10 @@ private:
     // of JUCE components in the same window).
     std::unique_ptr<juce::AudioProcessorEditor> hostedPluginEditor;
     std::unique_ptr<HostedEditorWindow>          hostedEditorWindow;
+
+    // Plugin B editor window (A/B comparison mode)
+    std::unique_ptr<juce::AudioProcessorEditor> hostedPluginEditorB;
+    std::unique_ptr<HostedEditorWindow>          hostedEditorWindowB;
 
     // Plugin descriptions (populated after scan, used for loadPlugin calls)
     juce::Array<juce::PluginDescription> knownDescs;
@@ -129,10 +138,14 @@ private:
     //   window.__JUCE__.backend.emitEvent('pluginscopeEvent', data)
     void handleNativeEvent (const juce::var& eventData);
 
+    int timerTick = 0;   // incremented each timerCallback() call (~30 Hz)
+
     //==========================================================================
     // Hosted editor helpers (message thread only)
     void embedHostedEditor();
     void removeHostedEditor();
+    void embedHostedEditorB();
+    void removeHostedEditorB();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginScopeAudioProcessorEditor)
 };

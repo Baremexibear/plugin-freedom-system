@@ -25,6 +25,40 @@
  *   comparison     -> comparisonRelay    / comparisonAttachment
  */
 
+// Floating window that hosts the loaded plugin's native editor UI.
+// Using a separate DocumentWindow avoids the WKWebView z-ordering issue:
+// native WebKit views always paint on top of JUCE components, so any
+// component overlaid on the WebView is invisible.  A separate NSWindow
+// has its own z-order and shows correctly above everything.
+class HostedEditorWindow : public juce::DocumentWindow
+{
+public:
+    std::function<void()> onClose;
+
+    HostedEditorWindow (const juce::String& name, juce::AudioProcessorEditor* editor)
+        : juce::DocumentWindow (name,
+                                juce::Colour (0xff1a1a1a),
+                                juce::DocumentWindow::closeButton,
+                                true /* addToDesktop */)
+    {
+        setUsingNativeTitleBar (true);
+        setResizable (true, false);
+        // Size the window to the editor's preferred bounds
+        setContentNonOwned (editor, true);
+        centreWithSize (juce::jmax (editor->getWidth(),  400),
+                        juce::jmax (editor->getHeight(), 300));
+        setVisible (true);
+    }
+
+    void closeButtonPressed() override
+    {
+        if (onClose) onClose();
+    }
+
+private:
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HostedEditorWindow)
+};
+
 class PluginScopeAudioProcessorEditor : public juce::AudioProcessorEditor,
                                         public juce::ChangeListener
 {
@@ -50,11 +84,11 @@ private:
     PluginScopeAudioProcessor& processorRef;
 
     //==========================================================================
-    // Hosted plugin native editor overlay (shown over left panel area)
-    // These are NOT inside the WebView — they are native JUCE Components
-    // parented to this editor and positioned over the WebView left panel.
-    juce::Component hostedPluginPanel;
+    // Hosted plugin native editor — shown in a separate floating window so it
+    // is not obscured by the WKWebView native view (which always paints on top
+    // of JUCE components in the same window).
     std::unique_ptr<juce::AudioProcessorEditor> hostedPluginEditor;
+    std::unique_ptr<HostedEditorWindow>          hostedEditorWindow;
 
     // Plugin descriptions (populated after scan, used for loadPlugin calls)
     juce::Array<juce::PluginDescription> knownDescs;

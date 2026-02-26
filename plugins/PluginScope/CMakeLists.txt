@@ -8,7 +8,7 @@ juce_add_plugin(PluginScope
     COMPANY_NAME "PluginFreedom"
     PLUGIN_MANUFACTURER_CODE Plgf
     PLUGIN_CODE PlSc
-    FORMATS VST3 AU
+    FORMATS VST3 AU Standalone
     PRODUCT_NAME "PluginScope"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
@@ -76,4 +76,7 @@ target_compile_definitions(PluginScope
         # Without these, JUCE_INTERNAL_HAS_VST3/AU remain 0 and no formats load.
         JUCE_PLUGINHOST_VST3=1
         JUCE_PLUGINHOST_AU=1
+        # Workaround for VST3 plugins that check process UID as copy protection.
+        # Without this, those plugins refuse to load with "Unable to load" error.
+        JUCE_PLUGINHOST_VST3_PROCESS_UID_MISMATCH_WORKAROUND=1
 )

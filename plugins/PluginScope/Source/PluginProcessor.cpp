@@ -4,6 +4,7 @@
 #if JUCE_MAC
  #include <AudioUnit/AudioUnit.h>   // AudioComponent, AudioComponentFindNext, OSType constants
  #include <CoreFoundation/CoreFoundation.h> // CFStringRef, CFRelease, noErr
+ #include <sys/xattr.h>             // removexattr — clear quarantine before dlopen
 #endif
 
 //==============================================================================
@@ -117,9 +118,49 @@ namespace SafeScanner
             pd.version          = version;
             pd.category         = cls["Sub-Categories"].toString();
 
-            auto uid = cls["UID"].toString().removeCharacters ("-");
-            if (uid.length() >= 8)
-                pd.uniqueId = (int) uid.substring (uid.length() - 8).getHexValue64();
+            // Compute uniqueId / deprecatedUid using JUCE's internal polynomial
+            // hash so that VST3ModuleHandle::findClassMatchingDescription() can
+            // match this description against the factory class at load time.
+            //
+            // JUCE requires (from juce_VST3PluginFormatImpl.h):
+            //   uniqueId     = getHashForRange(getNormalisedTUID(tuid))
+            //                  where getNormalisedTUID returns 4 big-endian uint32s
+            //   deprecatedUid = getHashForRange(tuid) — hash of 16 raw bytes
+            //   hash fn: value = (value*31 + item) for each item in range
+            //
+            // The matching check is:
+            //   if (uniqueId != desc.uniqueId && deprecatedUid != desc.deprecatedUid)
+            //       skip class;   ← BOTH must mismatch to fail
+            //
+            // Our old code took only the last 4 bytes of the UUID, which never
+            // matched JUCE's hash, causing createPluginInstanceAsync to return null.
+            {
+                auto uidStr = cls["UID"].toString().removeCharacters ("-");
+                if (uidStr.length() == 32)
+                {
+                    uint8_t tuid[16];
+                    for (int b = 0; b < 16; ++b)
+                        tuid[b] = (uint8_t) uidStr.substring (b * 2, b * 2 + 2).getHexValue32();
+
+                    // deprecatedUid: hash the 16 raw bytes
+                    uint32_t depHash = 0;
+                    for (auto b : tuid)
+                        depHash = (depHash * 31u) + b;
+                    pd.deprecatedUid = (int) depHash;
+
+                    // uniqueId: hash the 4 big-endian uint32 groups (normalised TUID)
+                    uint32_t longs[4];
+                    for (int g = 0; g < 4; ++g)
+                        longs[g] = ((uint32_t) tuid[g * 4 + 0] << 24)
+                                 | ((uint32_t) tuid[g * 4 + 1] << 16)
+                                 | ((uint32_t) tuid[g * 4 + 2] <<  8)
+                                 |  (uint32_t) tuid[g * 4 + 3];
+                    uint32_t uniqHash = 0;
+                    for (auto l : longs)
+                        uniqHash = (uniqHash * 31u) + l;
+                    pd.uniqueId = (int) uniqHash;
+                }
+            }
 
             pd.isInstrument = pd.category.containsIgnoreCase ("Instrument")
                            || pd.category.containsIgnoreCase ("Synth");
@@ -1078,11 +1119,18 @@ PluginScopeAudioProcessor::~PluginScopeAudioProcessor()
     if (scanThread != nullptr)
         scanThread->stopThread (3000);
 
-    // Phase 3.7: Release plugin B before plugin A
-    hostedPluginB.reset();
+    // Phase 3.7: Release plugin B before plugin A.
+    // SpinLock ensures the audio thread is not inside processBlock when we destroy.
+    {
+        const juce::SpinLock::ScopedLockType sl (pluginBLock);
+        hostedPluginB.reset();
+    }
 
     // Release hosted plugin on message thread
-    hostedPlugin.reset();
+    {
+        const juce::SpinLock::ScopedLockType sl (pluginLock);
+        hostedPlugin.reset();
+    }
 }
 
 //==============================================================================
@@ -1139,6 +1187,14 @@ void PluginScopeAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
 
 void PluginScopeAudioProcessor::releaseResources()
 {
+    // Reset FIFOs FIRST — analysis thread checks getNumReady() before touching
+    // the backing buffers.  Without resetting, the thread can find stale data in
+    // a FIFO whose backing buffer is about to become 0-channel, triggering the
+    // jassert(isPositiveAndBelow(channel, numChannels)) at AudioBuffer line 307.
+    captureFifo.reset();
+    dryCaptureFifo.reset();
+    captureFifoB.reset();
+
     // Release scratch buffers to save memory when plugin is not in use
     hostedInputBuffer .setSize (0, 0);
     hostedOutputBuffer.setSize (0, 0);
@@ -1376,20 +1432,31 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                 latencyImpulsePending.store (false);
             }
 
-            if (pluginReady.load() && hostedPlugin != nullptr)
             {
-                hostedOutputBuffer.clear();
-                juce::MidiBuffer emptyMidi;
-                try
+                const juce::SpinLock::ScopedTryLockType sl (pluginLock);
+                if (sl.isLocked() && pluginReady.load() && hostedPlugin != nullptr)
                 {
-                    hostedPlugin->processBlock (hostedOutputBuffer, emptyMidi);
+                    // Copy impulse signal into processing buffer as plugin input
+                    {
+                        const int nCh = hostedOutputBuffer.getNumChannels();
+                        for (int ch = 0; ch < nCh; ++ch)
+                        {
+                            const int srcCh = juce::jmin (ch, hostedInputBuffer.getNumChannels() - 1);
+                            hostedOutputBuffer.copyFrom (ch, 0, hostedInputBuffer, srcCh, 0, numSamples);
+                        }
+                    }
+                    juce::MidiBuffer emptyMidi;
+                    try
+                    {
+                        hostedPlugin->processBlock (hostedOutputBuffer, emptyMidi);
+                    }
+                    catch (...)
+                    {
+                        pluginReady.store (false);
+                    }
+                    if (pluginReady.load())
+                        captureOutputSamples (numSamples);
                 }
-                catch (...)
-                {
-                    pluginReady.store (false);
-                }
-                if (pluginReady.load())
-                    captureOutputSamples (numSamples);
             }
 
             buffer.clear();   // Output silence to DAW
@@ -1402,17 +1469,24 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     // -----------------------------------------------------------------------
     if (testSignalMode == 4)
     {
-        if (pluginReady.load() && hostedPlugin != nullptr)
+        const juce::SpinLock::ScopedTryLockType sl (pluginLock);
+        if (sl.isLocked() && pluginReady.load() && hostedPlugin != nullptr)
         {
-            // Copy DAW input into hosted plugin's pre-allocated input buffer
-            for (int ch = 0; ch < numChannels; ++ch)
-                hostedInputBuffer.copyFrom (ch, 0, buffer, ch, 0, numSamples);
+            // Copy DAW input into hostedOutputBuffer as plugin input.
+            // Extra plugin channels (beyond DAW channels) are cleared to silence.
+            {
+                const int nCh = hostedOutputBuffer.getNumChannels();
+                for (int ch = 0; ch < nCh; ++ch)
+                {
+                    if (ch < numChannels)
+                        hostedOutputBuffer.copyFrom (ch, 0, buffer, ch, 0, numSamples);
+                    else
+                        hostedOutputBuffer.clear (ch, 0, numSamples);
+                }
+            }
 
             // Phase 3.3: Capture DAW input as the dry (pre-plugin) reference
             captureDrySamples (numSamples);
-
-            // Clear hosted output buffer before processing
-            hostedOutputBuffer.clear();
 
             juce::MidiBuffer emptyMidi;
             try
@@ -1426,9 +1500,12 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
             if (pluginReady.load())
             {
-                // Copy hosted output back to the DAW buffer
+                // Copy hosted output back to the DAW buffer (only up to DAW channel count)
                 for (int ch = 0; ch < numChannels; ++ch)
-                    buffer.copyFrom (ch, 0, hostedOutputBuffer, ch, 0, numSamples);
+                {
+                    const int srcCh = juce::jmin (ch, hostedOutputBuffer.getNumChannels() - 1);
+                    buffer.copyFrom (ch, 0, hostedOutputBuffer, srcCh, 0, numSamples);
+                }
 
                 // Capture output for analysis engines
                 captureOutputSamples (numSamples);
@@ -1463,20 +1540,30 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                     dynamicsSinePhaseAccum -= juce::MathConstants<float>::twoPi;
             }
 
-            if (pluginReady.load() && hostedPlugin != nullptr)
             {
-                hostedOutputBuffer.clear();
-                juce::MidiBuffer emptyMidi;
-                try
+                const juce::SpinLock::ScopedTryLockType sl (pluginLock);
+                if (sl.isLocked() && pluginReady.load() && hostedPlugin != nullptr)
                 {
-                    hostedPlugin->processBlock (hostedOutputBuffer, emptyMidi);
+                    {
+                        const int nCh = hostedOutputBuffer.getNumChannels();
+                        for (int ch = 0; ch < nCh; ++ch)
+                        {
+                            const int srcCh = juce::jmin (ch, hostedInputBuffer.getNumChannels() - 1);
+                            hostedOutputBuffer.copyFrom (ch, 0, hostedInputBuffer, srcCh, 0, numSamples);
+                        }
+                    }
+                    juce::MidiBuffer emptyMidi;
+                    try
+                    {
+                        hostedPlugin->processBlock (hostedOutputBuffer, emptyMidi);
+                    }
+                    catch (...)
+                    {
+                        pluginReady.store (false);
+                    }
+                    if (pluginReady.load())
+                        captureOutputSamples (numSamples);
                 }
-                catch (...)
-                {
-                    pluginReady.store (false);
-                }
-                if (pluginReady.load())
-                    captureOutputSamples (numSamples);
             }
 
             buffer.clear();   // Output silence to DAW
@@ -1511,20 +1598,30 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             captureDrySamples (numSamples);
 
             // Route through hosted plugin and capture wet output
-            if (pluginReady.load() && hostedPlugin != nullptr)
             {
-                hostedOutputBuffer.clear();
-                juce::MidiBuffer emptyMidi;
-                try
+                const juce::SpinLock::ScopedTryLockType sl (pluginLock);
+                if (sl.isLocked() && pluginReady.load() && hostedPlugin != nullptr)
                 {
-                    hostedPlugin->processBlock (hostedOutputBuffer, emptyMidi);
+                    {
+                        const int nCh = hostedOutputBuffer.getNumChannels();
+                        for (int ch = 0; ch < nCh; ++ch)
+                        {
+                            const int srcCh = juce::jmin (ch, hostedInputBuffer.getNumChannels() - 1);
+                            hostedOutputBuffer.copyFrom (ch, 0, hostedInputBuffer, srcCh, 0, numSamples);
+                        }
+                    }
+                    juce::MidiBuffer emptyMidi;
+                    try
+                    {
+                        hostedPlugin->processBlock (hostedOutputBuffer, emptyMidi);
+                    }
+                    catch (...)
+                    {
+                        pluginReady.store (false);
+                    }
+                    if (pluginReady.load())
+                        captureOutputSamples (numSamples);
                 }
-                catch (...)
-                {
-                    pluginReady.store (false);
-                }
-                if (pluginReady.load())
-                    captureOutputSamples (numSamples);
             }
 
             buffer.clear();   // Output silence to DAW
@@ -1623,31 +1720,56 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     }
 
     // --- Route test signal through hosted plugin (if ready) and capture output ---
-    if (pluginReady.load() && hostedPlugin != nullptr)
     {
-        // Phase 3.3: Capture generated test signal as the dry (pre-plugin) reference
-        captureDrySamples (numSamples);
-
-        hostedOutputBuffer.clear();
-
-        juce::MidiBuffer emptyMidi;
-        try
+        const juce::SpinLock::ScopedTryLockType sl (pluginLock);
+        if (sl.isLocked() && pluginReady.load() && hostedPlugin != nullptr)
         {
-            hostedPlugin->processBlock (hostedOutputBuffer, emptyMidi);
-        }
-        catch (...)
-        {
-            pluginReady.store (false);
-        }
+            // Phase 3.3: Capture generated test signal as the dry (pre-plugin) reference
+            captureDrySamples (numSamples);
 
-        // Capture output for analysis engines (Phases 3.3+)
-        captureOutputSamples (numSamples);
+            // Copy test signal into hostedOutputBuffer so the plugin receives it as input.
+            // hostedInputBuffer is always 2-ch (stereo test signal).  For plugins with
+            // more than 2 channels, mirror ch0/ch1 into ch2/ch3 etc., or clear them.
+            {
+                const int nCh = hostedOutputBuffer.getNumChannels();
+                for (int ch = 0; ch < nCh; ++ch)
+                {
+                    const int srcCh = juce::jmin (ch, hostedInputBuffer.getNumChannels() - 1);
+                    hostedOutputBuffer.copyFrom (ch, 0, hostedInputBuffer, srcCh, 0, numSamples);
+                }
+            }
 
-        // Phase 3.7: A/B mode — also route same test signal through plugin B
+            juce::MidiBuffer emptyMidi;
+            try
+            {
+                hostedPlugin->processBlock (hostedOutputBuffer, emptyMidi);
+            }
+            catch (...)
+            {
+                pluginReady.store (false);
+            }
+
+            // Capture output for analysis engines (Phases 3.3+)
+            if (pluginReady.load())
+                captureOutputSamples (numSamples);
+        }
+    }
+
+    // Phase 3.7: A/B mode — also route same test signal through plugin B
+    {
+        const juce::SpinLock::ScopedTryLockType slB (pluginBLock);
         const int comparisonMode = static_cast<int> (comparisonParam->load());
-        if (comparisonMode == 1 && pluginBReady.load() && hostedPluginB != nullptr)
+        if (slB.isLocked() && comparisonMode == 1
+            && pluginBReady.load() && hostedPluginB != nullptr)
         {
-            hostedOutputBufferB.clear();
+            {
+                const int nCh = hostedOutputBufferB.getNumChannels();
+                for (int ch = 0; ch < nCh; ++ch)
+                {
+                    const int srcCh = juce::jmin (ch, hostedInputBuffer.getNumChannels() - 1);
+                    hostedOutputBufferB.copyFrom (ch, 0, hostedInputBuffer, srcCh, 0, numSamples);
+                }
+            }
             juce::MidiBuffer emptyMidiB;
             try
             {
@@ -1674,36 +1796,79 @@ void PluginScopeAudioProcessor::loadPlugin (
     // Must be called from the message thread
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
 
-    // Tell the audio thread to stop using the current hosted plugin
+    // Stop the audio thread from entering the plugin processing block, then
+    // wait until any in-progress processBlock has exited (SpinLock guarantees this).
     pluginReady.store (false);
+    {
+        const juce::SpinLock::ScopedLockType sl (pluginLock);
+        hostedPlugin.reset();
+    }
 
-    // Brief yield to allow the audio thread to observe the flag change
-    // (one audio callback cycle at typical buffer sizes is well under 10ms)
-    juce::Thread::sleep (10);
+    // Log what we're about to load so failures are diagnosable
+    juce::Logger::writeToLog ("[PluginScope] loadPlugin: \"" + desc.name
+        + "\" format=" + desc.pluginFormatName
+        + " file=" + desc.fileOrIdentifier);
 
-    // Release the old plugin instance (destructor called on message thread)
-    hostedPlugin.reset();
+   #if JUCE_MAC
+    if (desc.pluginFormatName == "VST3")
+    {
+        // Recursively remove com.apple.quarantine from the entire VST3 bundle.
+        // Quarantine blocks dlopen on macOS; removing it at the bundle root
+        // alone is not enough because individual files inside may also carry
+        // the attribute.
+        const auto& bundlePath = desc.fileOrIdentifier;
+        removexattr (bundlePath.toRawUTF8(), "com.apple.quarantine", 0);
+        for (auto& child : juce::File (bundlePath)
+                               .findChildFiles (juce::File::findFilesAndDirectories, true))
+            removexattr (child.getFullPathName().toRawUTF8(), "com.apple.quarantine", 0);
+    }
+   #endif
 
     // Load the new plugin asynchronously — required for AUv3 plugins
     formatManager.createPluginInstanceAsync (
         desc,
         currentSampleRate,
         currentBlockSize,
-        [this, callback] (std::unique_ptr<juce::AudioPluginInstance> instance,
+        [this, callback, descName = desc.name, descFmt = desc.pluginFormatName]
+        (std::unique_ptr<juce::AudioPluginInstance> instance,
                           const juce::String& error)
         {
             // This callback fires on the message thread
             if (instance != nullptr)
             {
                 instance->prepareToPlay (currentSampleRate, currentBlockSize);
-                hostedPlugin = std::move (instance);
-                pluginReady.store (true);
+
+                // Resize hosted scratch buffers to match the plugin's actual channel
+                // count.  Our buffers are pre-allocated as 2-ch stereo but some
+                // plugins are mono (1 ch) or multi-channel (4+).  If the buffer
+                // passed to processBlock has fewer channels than the plugin expects,
+                // JUCE's AU renderGetInput reads channel pointers beyond the buffer
+                // array — those slots are null/garbage → memmove to 0x0 → SIGSEGV.
+                // pluginReady is still false here so the audio thread is safely gated.
+                {
+                    const int numCh = juce::jmax (instance->getTotalNumInputChannels(),
+                                                  instance->getTotalNumOutputChannels(),
+                                                  2);  // Always at least stereo
+                    hostedInputBuffer .setSize (numCh, currentBlockSize, false, true, false);
+                    hostedOutputBuffer.setSize (numCh, currentBlockSize, false, true, false);
+                }
+
+                {
+                    const juce::SpinLock::ScopedLockType sl (pluginLock);
+                    hostedPlugin = std::move (instance);
+                }
+                // NOTE: pluginReady is intentionally NOT set here.
+                // The editor callback must call activatePlugin() AFTER embedHostedEditor()
+                // to prevent createEditor() from racing with processBlock on the audio
+                // thread (AU renderGetInput crash at address 0x0).
 
                 if (callback)
                     callback (true, {});
             }
             else
             {
+                juce::Logger::writeToLog ("[PluginScope] loadPlugin FAILED: \""
+                    + descName + "\" (" + descFmt + ") — " + error);
                 if (callback)
                     callback (false, error);
             }
@@ -1715,8 +1880,10 @@ void PluginScopeAudioProcessor::unloadPlugin()
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
 
     pluginReady.store (false);
-    juce::Thread::sleep (10);
-    hostedPlugin.reset();
+    {
+        const juce::SpinLock::ScopedLockType sl (pluginLock);
+        hostedPlugin.reset();
+    }
 }
 
 //==============================================================================
@@ -1729,10 +1896,12 @@ void PluginScopeAudioProcessor::loadPluginB (
 {
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
 
-    // Signal audio thread to stop using plugin B
+    // Signal audio thread to stop, then wait for any in-progress processBlock to finish
     pluginBReady.store (false);
-    juce::Thread::sleep (10);
-    hostedPluginB.reset();
+    {
+        const juce::SpinLock::ScopedLockType sl (pluginBLock);
+        hostedPluginB.reset();
+    }
 
     formatManager.createPluginInstanceAsync (
         desc,
@@ -1745,7 +1914,20 @@ void PluginScopeAudioProcessor::loadPluginB (
             if (instance != nullptr)
             {
                 instance->prepareToPlay (currentSampleRate, currentBlockSize);
-                hostedPluginB = std::move (instance);
+
+                // Resize plugin B scratch buffer to match the plugin's channel count
+                // (same reason as for plugin A — prevents AU renderGetInput null crash).
+                {
+                    const int numCh = juce::jmax (instance->getTotalNumInputChannels(),
+                                                  instance->getTotalNumOutputChannels(),
+                                                  2);
+                    hostedOutputBufferB.setSize (numCh, currentBlockSize, false, true, false);
+                }
+
+                {
+                    const juce::SpinLock::ScopedLockType sl (pluginBLock);
+                    hostedPluginB = std::move (instance);
+                }
                 pluginBReady.store (true);
                 if (callback) callback (true, {});
             }
@@ -1761,8 +1943,10 @@ void PluginScopeAudioProcessor::unloadPluginB()
     jassert (juce::MessageManager::getInstance()->isThisTheMessageThread());
 
     pluginBReady.store (false);
-    juce::Thread::sleep (10);
-    hostedPluginB.reset();
+    {
+        const juce::SpinLock::ScopedLockType sl (pluginBLock);
+        hostedPluginB.reset();
+    }
 }
 
 //==============================================================================

@@ -55,6 +55,12 @@ public:
     // Unload the currently hosted plugin (message thread only)
     void unloadPlugin();
 
+    // Activate the plugin for audio processing — call this AFTER embedHostedEditor()
+    // to ensure createEditor() does not race with the audio thread's processBlock.
+    // loadPlugin() leaves pluginReady=false; the editor callback must call this
+    // once it has finished embedding the hosted editor UI.
+    void activatePlugin() { pluginReady.store (true); }
+
     // Accessor for hosted plugin (message thread only)
     juce::AudioPluginInstance* getHostedPlugin() const { return hostedPlugin.get(); }
 
@@ -282,6 +288,12 @@ private:
 
     // Phase 3.7: captureOutputSamplesB helper — mirrors captureOutputSamples but uses B buffers
     void captureOutputSamplesB (int numSamples);
+
+    // SpinLocks — prevent processBlock from using a plugin pointer that the message
+    // thread is concurrently resetting.  Audio thread uses ScopedTryLockType (never
+    // blocks), message thread uses ScopedLockType (waits for audio thread to finish).
+    juce::SpinLock pluginLock;
+    juce::SpinLock pluginBLock;
 
     // Phase 3.7: Before-After snapshot storage (protected by resultMutex)
     std::vector<std::pair<float,float>> snapshotFreqResponse;

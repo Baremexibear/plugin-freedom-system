@@ -1145,6 +1145,60 @@ AudioProcessor(BusesProperties()
 
 ---
 
+## 23. AudioPluginFormatManager - addDefaultFormats() Deleted (JUCE 8)
+
+### ❌ WRONG (Deleted function — compile error)
+```cpp
+formatManager.addDefaultFormats(); // ERROR: explicitly deleted in JUCE 8
+```
+
+### ✅ CORRECT
+```cpp
+// JUCE 8: use free function from juce_audio_processors module
+juce::addDefaultFormatsToManager(formatManager);
+```
+
+**Why:** JUCE 8 replaced the member function with a standalone free function.
+The old `addDefaultFormats()` is explicitly `= delete` in `juce_AudioPluginFormatManager.h`.
+
+**When:** ANY plugin that hosts other plugins (AudioPluginFormatManager usage).
+
+---
+
+## 24. KnownPluginList - getType(int) Deprecated (JUCE 8)
+
+### ❌ WRONG (Deprecated — compiler warning treated as error)
+```cpp
+for (int i = 0; i < knownPluginList.getNumTypes(); ++i)
+    result.add(*knownPluginList.getType(i)); // deprecated
+```
+
+### ✅ CORRECT
+```cpp
+// JUCE 8: getTypes() returns Array<PluginDescription> directly
+return knownPluginList.getTypes();
+```
+
+**When:** ANY code reading plugin descriptions from KnownPluginList.
+
+---
+
+## 25. Font Constructor - Use FontOptions (JUCE 8)
+
+### ❌ WRONG (Deprecated)
+```cpp
+label.setFont(12.0f); // deprecated Font(float) constructor
+```
+
+### ✅ CORRECT
+```cpp
+label.setFont(juce::FontOptions(12.0f));
+```
+
+**When:** ALL Label, Graphics font size calls throughout UI code.
+
+---
+
 All patterns documented with full context in:
 - `troubleshooting/build-failures/`
 - `troubleshooting/runtime-issues/`

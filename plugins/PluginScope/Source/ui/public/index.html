@@ -1977,13 +1977,9 @@
   function onAnalyze() {
     var btn = document.getElementById('btn-analyze');
     var tab = tabKeys[state.analysisType] || 'frequency';
-    // Dynamics sweep takes ~8 s — progress driven by handleDynamicsResult()
-    if (tab === 'dynamics') {
-      dynamicsData = null;
-      btn.textContent = 'Starting\u2026';
-      btn.style.background = '#FF9F0A';
-    } else if (tab === 'latency') {
-      // Trigger impulse via dedicated handler
+
+    if (tab === 'latency') {
+      // Latency has its own dedicated trigger (impulse injection)
       callNative('triggerLatencyRequested', {});
       btn.textContent = 'Measuring\u2026';
       btn.style.background = '#FF9F0A';
@@ -1992,17 +1988,32 @@
         btn.style.background = '';
       }, 3000);
       return;
+    }
+
+    if (tab === 'dynamics') {
+      // Clear stale dynamics data so graph resets immediately on screen
+      dynamicsData  = null;
+      dynamicsDataB = null;
+      btn.textContent = 'Starting\u2026';
+      btn.style.background = '#FF9F0A';
+      // Button state is restored by handleDynamicsResult() once sweep starts
     } else {
-      btn.textContent = 'Running\u2026';
+      // Freq / THD / Phase — clear stale data so graph blanks until fresh data arrives
+      if (tab === 'frequency') { liveFreqData = null; liveFreqDataB = null; }
+      if (tab === 'phase')     { phaseData    = null; phaseDataB    = null; }
+      if (tab === 'distortion') thdData = null;
+      btn.textContent = 'Measuring\u2026';
       btn.style.background = '#30D158';
-      // Restore button after brief visual feedback (data arrives via timer)
+      // Restore after brief feedback — new data will arrive within ~200 ms
       setTimeout(function() {
         btn.innerHTML = '<span class="play-icon">&#9654;</span> Analyze';
         btn.style.background = '';
       }, 800);
     }
+
+    // Tell C++ to flush FIFOs and reset averaging so measurement is fresh
     callNative('analyzeRequested', {
-      testSignal: state.testSignal,
+      testSignal:   state.testSignal,
       analysisType: state.analysisType,
       analysisMode: state.analysisMode
     });

@@ -427,6 +427,36 @@ public:
                 continue;
             }
 
+            // ----------------------------------------------------------------
+            // Reset requested by user (Analyze button) — flush stale FIFOs
+            // and clear averaging accumulators so the next measurement is fresh.
+            // exchange(false) atomically reads and clears the flag.
+            // ----------------------------------------------------------------
+            if (proc.analysisResetPending.exchange (false))
+            {
+                // Drain all capture FIFOs (analysis thread is sole consumer — safe)
+                auto drainFifo = [] (juce::AbstractFifo& fifo)
+                {
+                    const int avail = fifo.getNumReady();
+                    if (avail > 0)
+                    {
+                        int s1, sz1, s2, sz2;
+                        fifo.prepareToRead (avail, s1, sz1, s2, sz2);
+                        fifo.finishedRead (sz1 + sz2);
+                    }
+                };
+
+                drainFifo (proc.captureFifo);
+                drainFifo (proc.dryCaptureFifo);
+                drainFifo (proc.captureFifoB);
+
+                // Reset EMA accumulators so freq/phase averaging starts fresh
+                proc.freqResponseFrameCount  = 0;
+                proc.freqResponseAccum.clear();
+                proc.freqResponseFrameCountB = 0;
+                proc.freqResponseAccumB.clear();
+            }
+
             // Snapshot mode — freeze result, don't analyse new data
             const int analysisMode = static_cast<int> (proc.analysisModeParam->load());
             if (analysisMode == 1)

@@ -424,10 +424,11 @@ void PluginScopeAudioProcessorEditor::handleNativeEvent (const juce::var& eventD
 
     if (type == "analyzeRequested")
     {
-        // Analysis is triggered by parameter changes (analysis_type, test_signal, analysis_mode)
-        // which are handled by the relay/attachment system. No additional C++ action needed here
-        // for Phase 4.1 (Phase 4.2 will add live data push).
-        juce::Logger::writeToLog ("[PluginScope] analyzeRequested from WebView");
+        // Signal the analysis thread to flush stale capture FIFOs and reset
+        // averaging accumulators.  The thread picks this up on its next loop
+        // iteration and starts a genuinely fresh measurement from clean state.
+        processorRef.triggerAnalysisReset();
+        juce::Logger::writeToLog ("[PluginScope] analyzeRequested — reset pending");
     }
     else if (type == "loadPluginRequested")
     {

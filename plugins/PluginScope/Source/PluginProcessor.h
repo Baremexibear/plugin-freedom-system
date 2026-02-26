@@ -115,6 +115,10 @@ public:
     float getLatencyMsB()       const { return latencyMsB.load(); }
     void  triggerLatencyMeasurement() { latencyImpulsePending.store (true); }
 
+    // Flush stale capture FIFOs and reset averaging accumulators on the analysis thread.
+    // Called by the editor when the user clicks Analyze.
+    void  triggerAnalysisReset()      { analysisResetPending.store (true); }
+
     // Phase 3.7: Plugin B API (message thread only — mirrors loadPlugin/unloadPlugin)
     void loadPluginB (const juce::PluginDescription& desc,
                       std::function<void(bool, const juce::String&)> callback);
@@ -286,6 +290,11 @@ private:
 
     // Triggers impulse injection in processBlock when analysis_type == 4
     std::atomic<bool> latencyImpulsePending { false };
+
+    // Set by message thread when user clicks Analyze.
+    // The analysis thread picks it up, flushes stale FIFOs, and resets
+    // averaging accumulators so the next measurement starts fresh.
+    std::atomic<bool> analysisResetPending { false };
 
     // Latency results — written exclusively by analysis thread, read by UI via atomics
     std::atomic<int>   latencyMethodA { 0 };   // samples from getLatencySamples()

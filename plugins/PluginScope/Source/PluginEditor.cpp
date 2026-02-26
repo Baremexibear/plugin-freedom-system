@@ -647,8 +647,49 @@ void PluginScopeAudioProcessorEditor::handleNativeEvent (const juce::var& eventD
     }
     else if (type == "exportRequested")
     {
-        // Phase 4.2: Implement export. Phase 4.1: placeholder.
-        juce::Logger::writeToLog ("[PluginScope] exportRequested — not yet implemented (Phase 4.2)");
+        // Notify JS: export is starting
+        if (webView != nullptr)
+            webView->evaluateJavascript (
+                "if(typeof handleExportStarted==='function')handleExportStarted();",
+                [] (juce::WebBrowserComponent::EvaluationResult) {});
+
+        // Open async save dialog.  fileChooser is a member so it stays alive
+        // for the entire async lifetime of the dialog.
+        auto pluginName = processorRef.getHostedPlugin() != nullptr
+                          ? processorRef.getHostedPlugin()->getName()
+                          : juce::String ("PluginScope");
+
+        auto safePluginName = pluginName.replaceCharacters (" /\\:*?\"<>|", "_________");
+        auto defaultName = safePluginName + "_analysis.csv";
+
+        fileChooser = std::make_unique<juce::FileChooser> (
+            "Export Analysis Data",
+            juce::File::getSpecialLocation (juce::File::userDesktopDirectory).getChildFile (defaultName),
+            "*.csv");
+
+        auto sentinel = processorRef.processorAlive;
+
+        fileChooser->launchAsync (
+            juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles,
+            [this, sentinel] (const juce::FileChooser& chooser)
+            {
+                if (! sentinel->load()) return;
+
+                auto result = chooser.getResult();
+                if (result == juce::File{})
+                {
+                    // User cancelled — clear the "exporting" state
+                    if (webView != nullptr)
+                        webView->evaluateJavascript (
+                            "if(typeof handleExportCancelled==='function')handleExportCancelled();",
+                            [] (juce::WebBrowserComponent::EvaluationResult) {});
+                    return;
+                }
+
+                // Add .csv extension if user didn't type one
+                auto dest = result.hasFileExtension ("csv") ? result : result.withFileExtension ("csv");
+                performExport (dest);
+            });
     }
     else if (type == "parameterChanged")
     {
@@ -982,6 +1023,234 @@ void PluginScopeAudioProcessorEditor::timerCallback()
                   + "}");
                 call ("if(typeof handleLatencyResult==='function')handleLatencyResult(" + j + ");");
             }
+        }
+    }
+}
+
+//==============================================================================
+// performExport — called on message thread after user selects a save path.
+//
+// Writes a multi-section CSV file:
+//   # FREQUENCY RESPONSE   — freq_hz, mag_db_A [, mag_db_B if B loaded]
+//   # THD HARMONICS        — harmonic_hz, amplitude_db
+//   # PHASE RESPONSE       — freq_hz, phase_deg_A [, phase_deg_B if B loaded]
+//   # DYNAMICS             — input_dbfs, output_dbfs_A [, output_dbfs_B if B loaded]
+//   # LATENCY              — method_A_samples, method_B_samples, ms_A, ms_B
+//
+// Empty sections (no data yet measured) are skipped with a note line.
+//==============================================================================
+void PluginScopeAudioProcessorEditor::performExport (const juce::File& destFile)
+{
+    juce::String csv;
+
+    auto pluginName = processorRef.getHostedPlugin() != nullptr
+                      ? processorRef.getHostedPlugin()->getName()
+                      : juce::String ("(no plugin loaded)");
+
+    auto pluginNameB = processorRef.getHostedPluginB() != nullptr
+                       ? processorRef.getHostedPluginB()->getName()
+                       : juce::String ("");
+
+    const bool hasB = !pluginNameB.isEmpty();
+
+    csv << "# PluginScope Analysis Export\n";
+    csv << "# Plugin A: " << pluginName << "\n";
+    if (hasB)
+        csv << "# Plugin B: " << pluginNameB << "\n";
+    csv << "# Date: " << juce::Time::getCurrentTime().toString (true, true) << "\n";
+    csv << "\n";
+
+    // ---- Frequency Response ------------------------------------------------
+    const auto freqA = processorRef.getFreqResponse();
+    const auto freqB = hasB ? processorRef.getFreqResponseB()
+                            : std::vector<std::pair<float,float>>{};
+
+    csv << "# FREQUENCY RESPONSE\n";
+    if (freqA.empty())
+    {
+        csv << "# (no frequency response data — run analysis first)\n\n";
+    }
+    else
+    {
+        csv << (hasB ? "freq_hz,mag_db_A,mag_db_B\n" : "freq_hz,mag_db\n");
+
+        // Log-space 512 points across 20–20000 Hz using binary search on source
+        const int kPoints = 512;
+        const float minL  = std::log10 (20.0f);
+        const float maxL  = std::log10 (20000.0f);
+
+        for (int i = 0; i < kPoints; ++i)
+        {
+            const float f  = std::pow (10.0f, minL + (maxL - minL) * i / (kPoints - 1));
+
+            auto nearestDb = [&] (const std::vector<std::pair<float,float>>& data) -> float
+            {
+                if (data.empty()) return 0.0f;
+                int lo = 0, hi = (int) data.size() - 1;
+                while (lo < hi)
+                {
+                    const int mid = (lo + hi) / 2;
+                    if (data[(size_t) mid].first < f) lo = mid + 1;
+                    else                               hi = mid;
+                }
+                return data[(size_t) lo].second;
+            };
+
+            csv << juce::String (f, 1) << "," << juce::String (nearestDb (freqA), 3);
+            if (hasB && !freqB.empty())
+                csv << "," << juce::String (nearestDb (freqB), 3);
+            csv << "\n";
+        }
+        csv << "\n";
+    }
+
+    // ---- Snapshot Frequency Response ---------------------------------------
+    if (processorRef.getHasSnapshot())
+    {
+        const auto snap = processorRef.getSnapshotFreqResponse();
+        csv << "# SNAPSHOT FREQUENCY RESPONSE (before)\n";
+        csv << "freq_hz,mag_db\n";
+
+        const int kPoints = 512;
+        const float minL  = std::log10 (20.0f);
+        const float maxL  = std::log10 (20000.0f);
+
+        for (int i = 0; i < kPoints; ++i)
+        {
+            const float f = std::pow (10.0f, minL + (maxL - minL) * i / (kPoints - 1));
+            int lo = 0, hi = (int) snap.size() - 1;
+            while (lo < hi)
+            {
+                const int mid = (lo + hi) / 2;
+                if (snap[(size_t) mid].first < f) lo = mid + 1;
+                else                               hi = mid;
+            }
+            csv << juce::String (f, 1) << "," << juce::String (snap[(size_t) lo].second, 3) << "\n";
+        }
+        csv << "\n";
+    }
+
+    // ---- THD Harmonics -----------------------------------------------------
+    const auto harmonics = processorRef.getThdHarmonics();
+    const float thdPct   = processorRef.getThdPercent();
+
+    csv << "# THD HARMONICS\n";
+    if (harmonics.empty())
+    {
+        csv << "# (no THD data — switch to Distortion analysis and run)\n\n";
+    }
+    else
+    {
+        csv << "# THD: " << juce::String (thdPct * 100.0f, 4) << "%\n";
+        csv << "harmonic_hz,amplitude_db\n";
+        for (const auto& h : harmonics)
+            csv << juce::String (h.first) << "," << juce::String (h.second, 6) << "\n";
+        csv << "\n";
+    }
+
+    // ---- Phase Response ----------------------------------------------------
+    const auto phaseA = processorRef.getPhaseResponse();
+    const auto phaseB = hasB ? processorRef.getPhaseResponseB()
+                              : std::vector<std::pair<float,float>>{};
+
+    csv << "# PHASE RESPONSE\n";
+    if (phaseA.empty())
+    {
+        csv << "# (no phase data — switch to Phase analysis and run)\n\n";
+    }
+    else
+    {
+        csv << (hasB ? "freq_hz,phase_deg_A,phase_deg_B\n" : "freq_hz,phase_deg\n");
+
+        const int kPoints = 512;
+        const float minL  = std::log10 (20.0f);
+        const float maxL  = std::log10 (20000.0f);
+
+        for (int i = 0; i < kPoints; ++i)
+        {
+            const float f = std::pow (10.0f, minL + (maxL - minL) * i / (kPoints - 1));
+
+            auto nearestPhase = [&] (const std::vector<std::pair<float,float>>& data) -> float
+            {
+                if (data.empty()) return 0.0f;
+                int lo = 0, hi = (int) data.size() - 1;
+                while (lo < hi)
+                {
+                    const int mid = (lo + hi) / 2;
+                    if (data[(size_t) mid].first < f) lo = mid + 1;
+                    else                               hi = mid;
+                }
+                return data[(size_t) lo].second;
+            };
+
+            csv << juce::String (f, 1) << "," << juce::String (nearestPhase (phaseA), 2);
+            if (hasB && !phaseB.empty())
+                csv << "," << juce::String (nearestPhase (phaseB), 2);
+            csv << "\n";
+        }
+        csv << "\n";
+    }
+
+    // ---- Dynamics ----------------------------------------------------------
+    const auto dynA = processorRef.getDynamicsResult();
+    const auto dynB = hasB ? processorRef.getDynamicsResultB()
+                           : std::vector<std::pair<float,float>>{};
+
+    csv << "# DYNAMICS (gain transfer function)\n";
+    if (dynA.empty())
+    {
+        csv << "# (no dynamics data — switch to Dynamics analysis and run)\n\n";
+    }
+    else
+    {
+        csv << (hasB ? "input_dbfs,output_dbfs_A,output_dbfs_B\n" : "input_dbfs,output_dbfs\n");
+        for (size_t i = 0; i < dynA.size(); ++i)
+        {
+            csv << juce::String (dynA[i].first, 1) << "," << juce::String (dynA[i].second, 2);
+            if (hasB && i < dynB.size())
+                csv << "," << juce::String (dynB[i].second, 2);
+            csv << "\n";
+        }
+        csv << "\n";
+    }
+
+    // ---- Latency -----------------------------------------------------------
+    const int   latA  = processorRef.getLatencyMethodA();
+    const int   latB2 = processorRef.getLatencyMethodB();
+    const float msA   = processorRef.getLatencyMsA();
+    const float msB2  = processorRef.getLatencyMsB();
+
+    csv << "# LATENCY\n";
+    if (latA < 0 && latB2 < 0)
+    {
+        csv << "# (no latency data — switch to Latency analysis and run)\n\n";
+    }
+    else
+    {
+        csv << "method_A_samples,method_B_samples,ms_A,ms_B\n";
+        csv << juce::String (latA) << "," << juce::String (latB2)
+            << "," << juce::String (msA, 2) << "," << juce::String (msB2, 2) << "\n\n";
+    }
+
+    // ---- Write to file -----------------------------------------------------
+    const bool ok = destFile.replaceWithText (csv);
+
+    if (webView != nullptr)
+    {
+        if (ok)
+        {
+            auto safePath = destFile.getFullPathName().replace ("\"", "\\\"");
+            webView->evaluateJavascript (
+                "if(typeof handleExportDone==='function')handleExportDone(\""
+                + safePath + "\");",
+                [] (juce::WebBrowserComponent::EvaluationResult) {});
+        }
+        else
+        {
+            webView->evaluateJavascript (
+                "if(typeof handleExportError==='function')"
+                "handleExportError('Failed to write file');",
+                [] (juce::WebBrowserComponent::EvaluationResult) {});
         }
     }
 }

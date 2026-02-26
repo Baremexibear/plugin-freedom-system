@@ -140,12 +140,18 @@ private:
 
     int timerTick = 0;   // incremented each timerCallback() call (~30 Hz)
 
+    // Async file chooser for export — kept alive across the async dialog lifetime.
+    std::unique_ptr<juce::FileChooser> fileChooser;
+
     //==========================================================================
     // Hosted editor helpers (message thread only)
     void embedHostedEditor();
     void removeHostedEditor();
     void embedHostedEditorB();
     void removeHostedEditorB();
+
+    // Export helper — builds CSV and writes to the given file.
+    void performExport (const juce::File& destFile);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginScopeAudioProcessorEditor)
 };

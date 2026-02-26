@@ -2016,6 +2016,33 @@
     callNative('exportRequested', {});
   }
 
+  /* ---- Export feedback handlers (called by C++ via evaluateJavascript) ---- */
+  function handleExportStarted() {
+    var btn = document.getElementById('btn-export');
+    if (btn) { btn.title = 'Exporting\u2026'; btn.style.opacity = '0.5'; btn.disabled = true; }
+  }
+
+  function handleExportDone(path) {
+    var btn = document.getElementById('btn-export');
+    if (btn) { btn.title = 'Export results'; btn.style.opacity = ''; btn.disabled = false; }
+    // Brief visual confirmation — green tint for 1.5 s
+    if (btn) {
+      btn.style.color = 'var(--green)';
+      setTimeout(function() { if (btn) btn.style.color = ''; }, 1500);
+    }
+  }
+
+  function handleExportCancelled() {
+    var btn = document.getElementById('btn-export');
+    if (btn) { btn.title = 'Export results'; btn.style.opacity = ''; btn.disabled = false; }
+  }
+
+  function handleExportError(msg) {
+    var btn = document.getElementById('btn-export');
+    if (btn) { btn.title = 'Export results'; btn.style.opacity = ''; btn.disabled = false; }
+    if (btn) { btn.style.color = '#ff453a'; setTimeout(function() { if (btn) btn.style.color = ''; }, 2000); }
+  }
+
   function onLoadPlugin() {
     // Fallback — no-op, plugin loading now done via plugin list
   }

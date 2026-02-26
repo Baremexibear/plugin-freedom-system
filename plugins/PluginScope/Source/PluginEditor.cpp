@@ -543,8 +543,9 @@ void PluginScopeAudioProcessorEditor::handleNativeEvent (const juce::var& eventD
     }
     else if (type == "unloadPluginRequested")
     {
-        processorRef.unloadPlugin();
+        // Editor MUST be destroyed before the plugin instance (see removeHostedEditor comment)
         removeHostedEditor();
+        processorRef.unloadPlugin();
 
         if (webView != nullptr)
         {
@@ -609,8 +610,8 @@ void PluginScopeAudioProcessorEditor::handleNativeEvent (const juce::var& eventD
     }
     else if (type == "unloadPluginBRequested")
     {
-        processorRef.unloadPluginB();
         removeHostedEditorB();
+        processorRef.unloadPluginB();
 
         if (webView != nullptr)
         {
@@ -692,28 +693,50 @@ void PluginScopeAudioProcessorEditor::embedHostedEditor()
     // notify the WebView JS so the browser panel updates.
     hostedEditorWindow->onClose = [this]
     {
-        processorRef.unloadPlugin();
-        hostedEditorWindow.reset();
+        // Null out immediately to prevent re-entry
+        hostedEditorWindow->onClose = nullptr;
+
+        // 1. Destroy the editor BEFORE the plugin (VST3PluginWindow::~
+        //    calls view->removed() which needs a live plugin DLL)
         hostedPluginEditor.reset();
 
-        if (webView != nullptr)
-            webView->evaluateJavascript (
-                "if (typeof handlePluginUnloaded === 'function') handlePluginUnloaded();",
-                [] (juce::WebBrowserComponent::EvaluationResult) {});
+        // 2. Release the plugin instance (safe: editor already gone)
+        processorRef.unloadPlugin();
+
+        // 3. Defer window destruction — we are currently executing inside
+        //    HostedEditorWindow::closeButtonPressed().  Deleting the window
+        //    from within its own call stack causes a stack-use-after-free.
+        juce::MessageManager::callAsync ([this]
+        {
+            hostedEditorWindow.reset();
+
+            if (webView != nullptr)
+                webView->evaluateJavascript (
+                    "if (typeof handlePluginUnloaded === 'function') handlePluginUnloaded();",
+                    [] (juce::WebBrowserComponent::EvaluationResult) {});
+        });
     };
 }
 
 //==============================================================================
 void PluginScopeAudioProcessorEditor::removeHostedEditor()
 {
+    // Null out the callback first to prevent any re-entrant call during destruction
+    if (hostedEditorWindow != nullptr)
+        hostedEditorWindow->onClose = nullptr;
+
+    // CRITICAL ORDER: destroy the editor (VST3PluginWindow) BEFORE the window,
+    // and BEFORE the plugin instance is unloaded by the caller.
+    // VST3PluginWindow::~VST3PluginWindow calls view->removed() which accesses
+    // the live plugin DLL.  Destroying the window first orphans the editor and
+    // then freeing the plugin causes a null-deref inside the VST3 destructor.
+    hostedPluginEditor.reset();
+
     if (hostedEditorWindow != nullptr)
     {
-        hostedEditorWindow->onClose = nullptr; // prevent re-entrant unloadPlugin
         hostedEditorWindow->setVisible (false);
         hostedEditorWindow.reset();
     }
-
-    hostedPluginEditor.reset();
 }
 
 //==============================================================================
@@ -736,14 +759,20 @@ void PluginScopeAudioProcessorEditor::embedHostedEditorB()
 
     hostedEditorWindowB->onClose = [this]
     {
-        processorRef.unloadPluginB();
-        hostedEditorWindowB.reset();
-        hostedPluginEditorB.reset();
+        hostedEditorWindowB->onClose = nullptr;
 
-        if (webView != nullptr)
-            webView->evaluateJavascript (
-                "if(typeof handlePluginBUnloaded==='function')handlePluginBUnloaded();",
-                [] (juce::WebBrowserComponent::EvaluationResult) {});
+        hostedPluginEditorB.reset();       // editor before plugin
+        processorRef.unloadPluginB();
+
+        juce::MessageManager::callAsync ([this]
+        {
+            hostedEditorWindowB.reset();
+
+            if (webView != nullptr)
+                webView->evaluateJavascript (
+                    "if(typeof handlePluginBUnloaded==='function')handlePluginBUnloaded();",
+                    [] (juce::WebBrowserComponent::EvaluationResult) {});
+        });
     };
 }
 
@@ -751,13 +780,15 @@ void PluginScopeAudioProcessorEditor::embedHostedEditorB()
 void PluginScopeAudioProcessorEditor::removeHostedEditorB()
 {
     if (hostedEditorWindowB != nullptr)
-    {
         hostedEditorWindowB->onClose = nullptr;
+
+    hostedPluginEditorB.reset();  // editor before window — same reason as removeHostedEditor()
+
+    if (hostedEditorWindowB != nullptr)
+    {
         hostedEditorWindowB->setVisible (false);
         hostedEditorWindowB.reset();
     }
-
-    hostedPluginEditorB.reset();
 }
 
 //==============================================================================

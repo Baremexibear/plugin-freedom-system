@@ -2226,6 +2226,11 @@ void PluginScopeAudioProcessor::unloadPluginB()
         const juce::SpinLock::ScopedLockType sl (pluginBLock);
         hostedPluginB.reset();
     }
+    // Reset B latency results so the UI shows "not measured" until next Analyze
+    latencyMethodAB.store (-1);
+    latencyMethodBB.store (-1);
+    latencyMsAB.store (0.0f);
+    latencyMsBB.store (0.0f);
 }
 
 //==============================================================================

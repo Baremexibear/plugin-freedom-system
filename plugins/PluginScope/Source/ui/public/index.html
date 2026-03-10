@@ -1038,11 +1038,11 @@
         <div id="comparison-legend" class="hidden">
           <div class="legend-item">
             <div class="legend-swatch" style="background:#0A84FF"></div>
-            <span>Plugin A</span>
+            <span id="legend-label-a">Plugin A</span>
           </div>
           <div class="legend-item">
-            <div class="legend-swatch" style="background:#FF9F0A"></div>
-            <span>Plugin B</span>
+            <div id="legend-swatch-b" class="legend-swatch" style="background:#FF9F0A"></div>
+            <span id="legend-label-b">Plugin B</span>
           </div>
         </div>
 
@@ -1239,6 +1239,23 @@
     if (index !== 0) {
       abBadges.classList.add('visible');
       legend.classList.remove('hidden');
+      // Update legend labels to match the active comparison mode
+      var isBeforeAfter = (index === 2);
+      document.getElementById('legend-label-a').textContent = isBeforeAfter ? 'After (live)'  : 'Plugin A';
+      document.getElementById('legend-label-b').textContent = isBeforeAfter ? 'Before (snapshot)' : 'Plugin B';
+      // Before-After snapshot is dashed — reflect that in the swatch
+      var swatchB = document.getElementById('legend-swatch-b');
+      swatchB.style.background   = isBeforeAfter ? 'transparent' : '#FF9F0A';
+      swatchB.style.borderBottom = isBeforeAfter ? '2px dashed #FF9F0A' : '';
+
+      // Auto-capture the current state as "Before" when switching into Before-After mode,
+      // so the user immediately has a reference curve without needing to click Snapshot.
+      if (isBeforeAfter && liveFreqData && liveFreqData.length > 0) {
+        // Copy immediately in JS so the graph updates on this draw call
+        snapshotFreqData = liveFreqData.map(function(p) { return [p[0], p[1]]; });
+        // Also tell C++ to persist the snapshot
+        callNative('snapshotRequested', {});
+      }
       drawGraph(tabKeys[state.analysisType], true);
     } else {
       abBadges.classList.remove('visible');
@@ -1443,17 +1460,28 @@
     if (W === 0 || H === 0) return;
     ctx.clearRect(0, 0, W, H);
     drawGrid(W, H, type);
+
+    var isAB          = showComparison && state.comparison === 1;
+    var isBeforeAfter = showComparison && state.comparison === 2;
+
     if (type === 'frequency') {
       drawFrequencyCurve(W, H, '#0A84FF', 'rgba(10,132,255,0.28)', 'rgba(10,132,255,0.0)', false);
-      if (showComparison) drawFrequencyCurveB(W, H, '#FF9F0A', 'rgba(255,159,10,0.18)', 'rgba(255,159,10,0.0)');
+      if (isAB)
+        // A/B Plugins: second curve is live Plugin B data
+        drawFrequencyCurveB(W, H, '#FF9F0A', 'rgba(255,159,10,0.18)', 'rgba(255,159,10,0.0)');
+      else if (isBeforeAfter && snapshotFreqData)
+        // Before-After: second curve is the frozen snapshot (amber, dashed)
+        drawFrequencyCurve(W, H, '#FF9F0A', 'rgba(255,159,10,0.12)', 'rgba(255,159,10,0.0)', true);
     } else if (type === 'dynamics') {
       drawDynamicsCurve(W, H, '#0A84FF', false);
-      if (showComparison) drawDynamicsCurve(W, H, '#FF9F0A', true);
+      if (isAB) drawDynamicsCurve(W, H, '#FF9F0A', true);
+      // Before-After has no dynamics snapshot — only single curve shown
     } else if (type === 'distortion') {
       drawDistortionBars(W, H);
     } else if (type === 'phase') {
       drawPhaseCurve(W, H, '#0A84FF');
-      if (showComparison) drawPhaseCurve(W, H, '#FF9F0A', true);
+      if (isAB) drawPhaseCurve(W, H, '#FF9F0A', true);
+      // Before-After has no phase snapshot — only single curve shown
     } else if (type === 'latency') {
       drawLatencyBar(W, H);
     }
@@ -1501,15 +1529,15 @@
       for (var i = 0; i < src.length; i++)
         points.push([freqToX(src[i][0], W), dbToY(src[i][1], H)]);
     } else {
+      if (offset) return;  // no snapshot yet — draw nothing, not a demo curve
       for (var i = 0; i <= 300; i++) {
         var t = i / 300;
         var f = Math.pow(10, 1.301 + t * 2.999);
-        var db = shelfCurve(f);
-        if (offset) db += 1.2;
-        points.push([t * W, dbToY(db, H)]);
+        points.push([t * W, dbToY(shelfCurve(f), H)]);
       }
     }
-    drawCurveWithFill(points, lineColor, fillTop, fillBottom, W, H);
+    // Snapshot curve is drawn dashed so it's visually distinct from the live curve
+    drawCurveWithFill(points, lineColor, fillTop, fillBottom, W, H, offset);
   }
 
   function drawFrequencyCurveB(W, H, lineColor, fillTop, fillBottom) {
@@ -1544,7 +1572,7 @@
     return bellLow + highShelf;
   }
 
-  function drawCurveWithFill(points, lineColor, fillTop, fillBottom, W, H) {
+  function drawCurveWithFill(points, lineColor, fillTop, fillBottom, W, H, dashed) {
     if (!points.length) return;
     var grad = ctx.createLinearGradient(0, 0, 0, H);
     grad.addColorStop(0, fillTop);
@@ -1557,7 +1585,10 @@
     ctx.beginPath();
     ctx.moveTo(points[0][0], points[0][1]);
     for (var j = 1; j < points.length; j++) ctx.lineTo(points[j][0], points[j][1]);
-    ctx.strokeStyle = lineColor; ctx.lineWidth = 1.8; ctx.setLineDash([]); ctx.stroke();
+    ctx.strokeStyle = lineColor; ctx.lineWidth = 1.8;
+    ctx.setLineDash(dashed ? [5, 4] : []);
+    ctx.stroke();
+    ctx.setLineDash([]);
   }
 
   function drawDynamicsCurve(W, H, color, offset) {
@@ -1599,20 +1630,24 @@
   }
 
   function drawDistortionBars(W, H) {
-    var harmonics, amplitudes;
+    var freqsHz, amplitudes;
     if (thdData && thdData.harmonics && thdData.harmonics.length > 0) {
-      harmonics  = thdData.harmonics.map(function(h) { return h[0]; });
-      amplitudes = thdData.harmonics.map(function(h) { return h[1]; });
+      // h[0] = harmonic number (1-8), multiply by fundamental (1 kHz) to get Hz
+      freqsHz = thdData.harmonics.map(function(h) { return h[0] * 1000; });
+      // h[1] = amplitude in dBFS — convert to linear then normalise relative to H1
+      var linAmps = thdData.harmonics.map(function(h) { return Math.pow(10, h[1] / 20); });
+      var h1Lin   = linAmps[0] || 1e-10;
+      amplitudes  = linAmps.map(function(a) { return a / h1Lin; });
     } else {
       // Demo fallback
-      harmonics  = [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000];
+      freqsHz    = [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000];
       amplitudes = [1.0, 0.09, 0.03, 0.015, 0.008, 0.004, 0.003, 0.002];
     }
     var barW = W * 0.006;
-    harmonics.forEach(function(f, idx) {
-      var x = freqToX(f, W);
+    freqsHz.forEach(function(f, idx) {
+      var x    = freqToX(f, W);
       var barH = amplitudes[idx] * H * 0.8;
-      var y = H - barH;
+      var y    = H - barH;
       var grad = ctx.createLinearGradient(0, y, 0, H);
       if (idx === 0) {
         grad.addColorStop(0, '#0A84FF'); grad.addColorStop(1, 'rgba(10,132,255,0.3)');
@@ -1621,12 +1656,20 @@
       }
       ctx.fillStyle = grad; ctx.fillRect(x - barW / 2, y, barW, barH);
     });
-    // THD % label
+    // THD % label — thdData.percent is already in % (e.g. 5.0 = 5%)
     if (thdData && thdData.percent > 0) {
       ctx.fillStyle = '#8E8E93';
       ctx.font = '11px Inter, system-ui, sans-serif';
-      ctx.fillText('THD: ' + (thdData.percent * 100).toFixed(3) + '%', 8, 16);
+      ctx.fillText('THD: ' + thdData.percent.toFixed(3) + '%', 8, 16);
     }
+  }
+
+  // Wrap any phase value (degrees) to the canonical [-180, +180] range.
+  // Used so the display always fits on screen regardless of unwrapped accumulation.
+  function wrapDeg(d) {
+    d = ((d % 360) + 360) % 360;  // [0, 360)
+    if (d > 180) d -= 360;         // [-180, +180]
+    return d;
   }
 
   function drawPhaseCurve(W, H, color, offset) {
@@ -1634,8 +1677,10 @@
     var points = [];
     if (src && src.length > 0) {
       // Real data: [[freq_hz, degrees], ...]
+      // Wrap to ±180° so the curve always fits on-screen regardless of
+      // how much the C++ unwrapper has accumulated.
       for (var i = 0; i < src.length; i++)
-        points.push([freqToX(src[i][0], W), H * (1 - (src[i][1] + 180) / 360)]);
+        points.push([freqToX(src[i][0], W), H * (1 - (wrapDeg(src[i][1]) + 180) / 360)]);
     } else {
       // Fallback demo curve until real data arrives
       for (var i = 0; i <= 300; i++) {
@@ -1704,13 +1749,28 @@
       ctx.fillText(measText, 0, measY);
     }
 
-    if (latA >= 0)
-      drawRow('Method A  (plugin reported via getLatencySamples)',
-              latA, msA, '#0A84FF', 'rgba(10,132,255,0.35)', startY);
+    var hasB = state.comparison !== 0
+               && latencyData.methodAB !== undefined
+               && latencyData.methodAB >= 0;
 
+    // Plugin A rows
+    if (latA >= 0)
+      drawRow((hasB ? 'Plugin A  -  ' : '') + 'Method A  (plugin reported)',
+              latA, msA, '#0A84FF', 'rgba(10,132,255,0.35)', startY);
     if (latB >= 0)
-      drawRow('Method B  (empirical impulse measurement)',
-              latB, msB, '#FF9F0A', 'rgba(255,159,10,0.35)', startY + rowH);
+      drawRow((hasB ? 'Plugin A  -  ' : '') + 'Method B  (empirical impulse)',
+              latB, msB, '#0A84FF', 'rgba(10,132,255,0.20)', startY + rowH);
+
+    // Plugin B rows (only when comparison is active and B has been measured)
+    if (hasB) {
+      drawRow('Plugin B  -  Method A  (plugin reported)',
+              latencyData.methodAB, latencyData.msAB,
+              '#FF9F0A', 'rgba(255,159,10,0.35)', startY + rowH * 2);
+      if (latencyData.methodBB >= 0)
+        drawRow('Plugin B  -  Method B  (empirical impulse)',
+                latencyData.methodBB, latencyData.msBB,
+                '#FF9F0A', 'rgba(255,159,10,0.20)', startY + rowH * 3);
+    }
   }
 
   /* ================================================================
@@ -1768,8 +1828,9 @@
 
   function handleSnapshotFreqResponse(data) {
     snapshotFreqData = data;
-    if (tabKeys[state.analysisType] === 'frequency')
-      drawGraph('frequency', state.comparison !== 0);
+    // Only redraw if Before-After mode is active — snapshot is irrelevant otherwise
+    if (tabKeys[state.analysisType] === 'frequency' && state.comparison === 2)
+      drawGraph('frequency', true);
   }
 
   function handleThdResult(data) {
@@ -1779,8 +1840,25 @@
     updateSummaryText();
   }
 
+  // EMA blend factor for phase smoothing (lower = smoother but slower to respond)
+  var phaseAlpha = 0.2;
+
   function handlePhaseResponse(data) {
-    phaseData = data;
+    if (!phaseData || phaseData.length !== data.length) {
+      phaseData = data;
+    } else {
+      // Blend each bin's phase toward the new value.
+      // Operate on wrapped values to avoid jump artefacts near ±180°.
+      for (var i = 0; i < data.length; i++) {
+        var prev = wrapDeg(phaseData[i][1]);
+        var next = wrapDeg(data[i][1]);
+        // Handle wrap discontinuity: if the two values are > 180° apart, go the short way
+        var diff = next - prev;
+        if (diff >  180) diff -= 360;
+        if (diff < -180) diff += 360;
+        phaseData[i] = [data[i][0], prev + phaseAlpha * diff];
+      }
+    }
     if (tabKeys[state.analysisType] === 'phase')
       drawGraph('phase', state.comparison !== 0);
   }
@@ -1819,7 +1897,18 @@
   }
 
   function handlePhaseResponseB(data) {
-    phaseDataB = data;
+    if (!phaseDataB || phaseDataB.length !== data.length) {
+      phaseDataB = data;
+    } else {
+      for (var i = 0; i < data.length; i++) {
+        var prev = wrapDeg(phaseDataB[i][1]);
+        var next = wrapDeg(data[i][1]);
+        var diff = next - prev;
+        if (diff >  180) diff -= 360;
+        if (diff < -180) diff += 360;
+        phaseDataB[i] = [data[i][0], prev + phaseAlpha * diff];
+      }
+    }
     if (tabKeys[state.analysisType] === 'phase' && state.comparison !== 0)
       drawGraph('phase', true);
   }
@@ -2128,7 +2217,7 @@
 
   function _thdAnalysis(data) {
     if (!data) return null;
-    var pct = (data.percent || 0) * 100;
+    var pct = data.percent || 0;   // already in % (e.g. 5.0 = 5% THD)
     var harmonics = data.harmonics || [];
     var evenAmp = 0, oddAmp = 0;
     for (var i = 1; i < harmonics.length; i++) {

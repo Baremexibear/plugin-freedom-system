@@ -753,8 +753,23 @@ private:
         const float binHz      = sampleRate / static_cast<float> (proc.kFftSize);
 
         // Compute wrapped phase: φ(f) = arg(H(f)) = atan2(Im(Wet/Dry), Re(Wet/Dry))
-        std::vector<float> wrappedPhase (proc.kFreqBins);
+        // Magnitude gate: skip bins where the dry signal is too weak to give a reliable
+        // phase estimate.  Without this, very low-energy bins (near DC or above 18 kHz
+        // with a sine sweep) produce random phase that causes visible noise.
+        std::vector<float> wrappedPhase (proc.kFreqBins, 0.0f);
         std::vector<std::pair<float,float>> phaseFrame (proc.kFreqBins);
+
+        // Compute the median dry magnitude to set the gate threshold adaptively
+        float maxDryMag = 0.0f;
+        for (int bin = 0; bin < proc.kFreqBins; ++bin)
+        {
+            const float dRe = proc.fftDryBuf[(size_t) (bin * 2)];
+            const float dIm = proc.fftDryBuf[(size_t) (bin * 2 + 1)];
+            const float mag = std::sqrt (dRe * dRe + dIm * dIm);
+            if (mag > maxDryMag) maxDryMag = mag;
+        }
+        // Only compute phase for bins at least 1% of the peak dry magnitude (-40 dB)
+        const float gateThreshold = maxDryMag * 0.01f + 1e-10f;
 
         for (int bin = 0; bin < proc.kFreqBins; ++bin)
         {
@@ -763,13 +778,23 @@ private:
             const float dryRe = proc.fftDryBuf[(size_t) (bin * 2)];
             const float dryIm = proc.fftDryBuf[(size_t) (bin * 2 + 1)];
 
+            const float dryMag = std::sqrt (dryRe * dryRe + dryIm * dryIm);
+            phaseFrame[bin].first = (float) bin * binHz;
+
+            if (dryMag < gateThreshold)
+            {
+                // Not enough signal — interpolate from nearest valid neighbour later,
+                // for now set to previous bin's phase to avoid wild jumps.
+                wrappedPhase[bin] = (bin > 0) ? wrappedPhase[bin - 1] : 0.0f;
+                continue;
+            }
+
             // H(f) = Wet / Dry (complex division)
-            const float dryMagSq = dryRe * dryRe + dryIm * dryIm + 1e-20f;
+            const float dryMagSq = dryMag * dryMag + 1e-20f;
             const float hRe      = (wetRe * dryRe + wetIm * dryIm) / dryMagSq;
             const float hIm      = (wetIm * dryRe - wetRe * dryIm) / dryMagSq;
 
-            wrappedPhase[bin]  = std::atan2 (hIm, hRe);   // radians, [-π, π]
-            phaseFrame[bin].first = (float) bin * binHz;
+            wrappedPhase[bin] = std::atan2 (hIm, hRe);   // radians, [-π, π]
         }
 
         // Phase unwrapping — remove 2π discontinuities
@@ -820,15 +845,21 @@ private:
 
             for (int bin = 0; bin < proc.kFreqBins; ++bin)
             {
-                const float wRe = proc.fftWetBuf[(size_t) (bin * 2)];
-                const float wIm = proc.fftWetBuf[(size_t) (bin * 2 + 1)];
-                const float dRe = proc.fftDryBuf[(size_t) (bin * 2)];
-                const float dIm = proc.fftDryBuf[(size_t) (bin * 2 + 1)];
-                const float dMagSq = dRe * dRe + dIm * dIm + 1e-20f;
+                const float wRe  = proc.fftWetBuf[(size_t) (bin * 2)];
+                const float wIm  = proc.fftWetBuf[(size_t) (bin * 2 + 1)];
+                const float dRe  = proc.fftDryBuf[(size_t) (bin * 2)];
+                const float dIm  = proc.fftDryBuf[(size_t) (bin * 2 + 1)];
+                phaseFrameB[bin].first = (float) bin * binHz;
+                const float dMag = std::sqrt (dRe * dRe + dIm * dIm);
+                if (dMag < gateThreshold)
+                {
+                    wrappedPhaseB[bin] = (bin > 0) ? wrappedPhaseB[bin - 1] : 0.0f;
+                    continue;
+                }
+                const float dMagSq = dMag * dMag + 1e-20f;
                 const float hRe    = (wRe * dRe + wIm * dIm) / dMagSq;
                 const float hIm    = (wIm * dRe - wRe * dIm) / dMagSq;
                 wrappedPhaseB[bin]    = std::atan2 (hIm, hRe);
-                phaseFrameB[bin].first = (float) bin * binHz;
             }
 
             const std::vector<float> unwrappedB = unwrapPhase (wrappedPhaseB);

@@ -1017,10 +1017,14 @@ void PluginScopeAudioProcessorEditor::timerCallback()
             if (latA >= 0 || latB >= 0)
             {
                 const juce::String j (
-                    "{\"methodA\":" + juce::String (latA)
-                  + ",\"methodB\":" + juce::String (latB)
-                  + ",\"msA\":"     + juce::String (processorRef.getLatencyMsA(), 2)
-                  + ",\"msB\":"     + juce::String (processorRef.getLatencyMsB(), 2)
+                    "{\"methodA\":"  + juce::String (latA)
+                  + ",\"methodB\":"  + juce::String (latB)
+                  + ",\"msA\":"      + juce::String (processorRef.getLatencyMsA(), 2)
+                  + ",\"msB\":"      + juce::String (processorRef.getLatencyMsB(), 2)
+                  + ",\"methodAB\":" + juce::String (processorRef.getLatencyMethodAB())
+                  + ",\"methodBB\":" + juce::String (processorRef.getLatencyMethodBB())
+                  + ",\"msAB\":"     + juce::String (processorRef.getLatencyMsAB(), 2)
+                  + ",\"msBB\":"     + juce::String (processorRef.getLatencyMsBB(), 2)
                   + "}");
                 call ("if(typeof handleLatencyResult==='function')handleLatencyResult(" + j + ");");
             }

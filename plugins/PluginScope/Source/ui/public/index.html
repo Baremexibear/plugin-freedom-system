@@ -992,7 +992,7 @@
         <button class="analysis-tab" data-tab="phase"     data-value="3" onclick="switchAnalysisTab('phase', this)">Phase</button>
         <button class="analysis-tab" data-tab="latency"   data-value="4" onclick="switchAnalysisTab('latency', this)">Latency</button>
         <div class="tab-spacer"></div>
-        <span class="graph-meta" id="graph-meta-label">20 Hz &ndash; 20 kHz &nbsp;&middot;&nbsp; &plusmn;18 dB</span>
+        <span class="graph-meta" id="graph-meta-label">6 Hz &ndash; 30 kHz &nbsp;&middot;&nbsp; &plusmn;30 dB</span>
       </div>
 
       <!-- Graph canvas area -->
@@ -1012,13 +1012,13 @@
 
         <!-- Y-axis labels -->
         <div id="y-axis-labels">
-          <span class="y-label">+18</span>
-          <span class="y-label">+12</span>
-          <span class="y-label">+6</span>
+          <span class="y-label">+30</span>
+          <span class="y-label">+20</span>
+          <span class="y-label">+10</span>
           <span class="y-label">&ensp;0</span>
-          <span class="y-label">&minus;6</span>
-          <span class="y-label">&minus;12</span>
-          <span class="y-label">&minus;18</span>
+          <span class="y-label">&minus;10</span>
+          <span class="y-label">&minus;20</span>
+          <span class="y-label">&minus;30</span>
         </div>
 
         <!-- X-axis labels -->
@@ -1342,10 +1342,10 @@
      ANALYSIS TYPE TABS (analysis_type)
   ================================================================ */
   var graphMeta = {
-    frequency:  '20 Hz \u2013 20 kHz \u00B7 \u00B118 dB',
+    frequency:  '6 Hz \u2013 30 kHz \u00B7 \u00B130 dB',
     dynamics:   '\u221260 dBFS \u2013 0 dBFS \u00B7 Gain Reduction',
-    distortion: '20 Hz \u2013 20 kHz \u00B7 THD+N',
-    phase:      '20 Hz \u2013 20 kHz \u00B7 Phase (deg)',
+    distortion: '6 Hz \u2013 30 kHz \u00B7 THD+N',
+    phase:      '6 Hz \u2013 30 kHz \u00B7 Phase (deg)',
     latency:    'Sample offset \u00B7 ms'
   };
 
@@ -1354,6 +1354,7 @@
     state.analysisType = index;
     sendParameterChange('analysis_type', index);
     applyAnalysisTypeUI(index);
+    updateSummaryText();
   }
 
   function applyAnalysisTypeUI(index) {
@@ -1380,7 +1381,7 @@
     var xLabels, yLabels;
 
     if (tab === 'frequency' || tab === 'distortion' || tab === 'phase') {
-      xLabels = ['20', '100', '200', '500', '1k', '2k', '5k', '10k', '20k'];
+      xLabels = ['6', '10', '20', '50', '100', '500', '1k', '2k', '5k', '10k', '20k'];
     } else if (tab === 'dynamics') {
       xLabels = ['\u221260', '\u221248', '\u221236', '\u221224', '\u221212', '0'];
     } else {
@@ -1395,7 +1396,7 @@
       yLabels = ['20ms', '15ms', '10ms', '5ms', '0ms'];
     } else {
       if (state.viewMode === 1) {
-        yLabels = ['+18', '+12', '+6', '0', '\u22126', '\u221212', '\u221218'];
+        yLabels = ['+30', '+20', '+10', '0', '\u221210', '\u221220', '\u221230'];
       } else {
         yLabels = ['', '', '', '', '', '', ''];
       }
@@ -1465,6 +1466,7 @@
     var isBeforeAfter = showComparison && state.comparison === 2;
 
     if (type === 'frequency') {
+      drawSpectrumBg(W, H);
       drawFrequencyCurve(W, H, '#0A84FF', 'rgba(10,132,255,0.28)', 'rgba(10,132,255,0.0)', false);
       if (isAB)
         // A/B Plugins: second curve is live Plugin B data
@@ -1502,7 +1504,7 @@
     ctx.strokeStyle = '#2C2C2E';
     ctx.lineWidth = 1;
     if (type === 'frequency' || type === 'distortion' || type === 'phase') {
-      var freqs = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+      var freqs = [6, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 30000];
       freqs.forEach(function(f) {
         var x = Math.round(freqToX(f, W)) + 0.5;
         ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
@@ -1516,11 +1518,91 @@
   }
 
   function freqToX(f, W) {
-    var minF = Math.log10(20), maxF = Math.log10(20000);
+    var minF = Math.log10(6), maxF = Math.log10(30000);
     return (Math.log10(f) - minF) / (maxF - minF) * W;
   }
 
-  function dbToY(db, H) { return H * (1 - (db + 18) / 36); }
+  // Blends repeated Y values caused by coarse FFT bins at low frequencies.
+  // Applies N passes of a weighted 5-point average [1,2,2,2,1]/8.
+  // After 4 passes the effective kernel is ~18 points wide — enough to
+  // dissolve the 10-15-point plateaus that appear below ~300 Hz.
+  function smoothFreqPoints(pts, passes) {
+    var r = pts.map(function(p) { return [p[0], p[1]]; });
+    for (var p = 0; p < passes; p++) {
+      for (var i = 2; i < r.length - 2; i++) {
+        r[i][1] = (r[i-2][1] + r[i-1][1]*2 + r[i][1]*2 + r[i+1][1]*2 + r[i+2][1]) / 8;
+      }
+    }
+    return r;
+  }
+
+  // Draws a smooth curve through pts using quadratic bezier segments.
+  // Each data point acts as control point; midpoints between adjacent
+  // points are the on-curve endpoints — eliminates staircase artifacts
+  // at low frequencies where FFT bins are coarse.
+  function traceSmoothPath(pts) {
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (var k = 1; k < pts.length - 1; k++) {
+      var mx = (pts[k][0] + pts[k+1][0]) * 0.5;
+      var my = (pts[k][1] + pts[k+1][1]) * 0.5;
+      ctx.quadraticCurveTo(pts[k][0], pts[k][1], mx, my);
+    }
+    ctx.lineTo(pts[pts.length-1][0], pts[pts.length-1][1]);
+  }
+
+  function dbToY(db, H) { return H * (1 - (db + 30) / 60); }
+
+  // Maps raw dBFS spectrum values to canvas Y.
+  // 0 dBFS → top (y=0), -90 dBFS → bottom (y=H).
+  function specDbToY(db, H) {
+    var clamped = Math.max(-90, Math.min(0, db));
+    return H * (1 - (clamped + 90) / 90);
+  }
+
+  // Draws the Pro-Q-style spectrum background: gray for dry input, blue for wet output.
+  // Both curves use their own dBFS scale (independent of the ±30 dB transfer function axis)
+  // and are drawn BEFORE the transfer function curve so they sit behind it.
+  function drawSpectrumBg(W, H) {
+    function specPoints(src) {
+      if (!src || !src.length) return [];
+      var pts = [];
+      for (var i = 0; i < src.length; i++)
+        pts.push([freqToX(src[i][0], W), specDbToY(src[i][1], H)]);
+      return smoothFreqPoints(pts, 2);
+    }
+
+    // Dry spectrum — gray, subtle fill
+    var dryPts = specPoints(drySpectrumData);
+    if (dryPts.length) {
+      var dryGrad = ctx.createLinearGradient(0, 0, 0, H);
+      dryGrad.addColorStop(0, 'rgba(160,160,160,0.28)');
+      dryGrad.addColorStop(1, 'rgba(160,160,160,0.0)');
+      ctx.beginPath();
+      traceSmoothPath(dryPts);
+      ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
+      ctx.fillStyle = dryGrad; ctx.fill();
+      ctx.beginPath();
+      traceSmoothPath(dryPts);
+      ctx.strokeStyle = 'rgba(160,160,160,0.55)';
+      ctx.lineWidth = 1.2; ctx.setLineDash([]); ctx.stroke();
+    }
+
+    // Wet spectrum — blue, slightly more prominent
+    var wetPts = specPoints(wetSpectrumData);
+    if (wetPts.length) {
+      var wetGrad = ctx.createLinearGradient(0, 0, 0, H);
+      wetGrad.addColorStop(0, 'rgba(10,132,255,0.22)');
+      wetGrad.addColorStop(1, 'rgba(10,132,255,0.0)');
+      ctx.beginPath();
+      traceSmoothPath(wetPts);
+      ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
+      ctx.fillStyle = wetGrad; ctx.fill();
+      ctx.beginPath();
+      traceSmoothPath(wetPts);
+      ctx.strokeStyle = 'rgba(10,132,255,0.5)';
+      ctx.lineWidth = 1.2; ctx.setLineDash([]); ctx.stroke();
+    }
+  }
 
   function drawFrequencyCurve(W, H, lineColor, fillTop, fillBottom, offset) {
     var src = offset ? snapshotFreqData : liveFreqData;
@@ -1528,6 +1610,7 @@
     if (src && src.length > 0) {
       for (var i = 0; i < src.length; i++)
         points.push([freqToX(src[i][0], W), dbToY(src[i][1], H)]);
+      points = smoothFreqPoints(points, 4);
     } else {
       if (offset) return;  // no snapshot yet — draw nothing, not a demo curve
       for (var i = 0; i <= 300; i++) {
@@ -1546,6 +1629,7 @@
     if (src && src.length > 0) {
       for (var i = 0; i < src.length; i++)
         points.push([freqToX(src[i][0], W), dbToY(src[i][1], H)]);
+      points = smoothFreqPoints(points, 4);
     } else {
       // Fallback demo curve shown before Plugin B has been measured
       for (var i = 0; i <= 300; i++) {
@@ -1578,13 +1662,11 @@
     grad.addColorStop(0, fillTop);
     grad.addColorStop(1, fillBottom);
     ctx.beginPath();
-    ctx.moveTo(points[0][0], points[0][1]);
-    for (var i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
+    traceSmoothPath(points);
     ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
     ctx.fillStyle = grad; ctx.fill();
     ctx.beginPath();
-    ctx.moveTo(points[0][0], points[0][1]);
-    for (var j = 1; j < points.length; j++) ctx.lineTo(points[j][0], points[j][1]);
+    traceSmoothPath(points);
     ctx.strokeStyle = lineColor; ctx.lineWidth = 1.8;
     ctx.setLineDash(dashed ? [5, 4] : []);
     ctx.stroke();
@@ -1807,6 +1889,8 @@
   ================================================================ */
   var liveFreqData     = null;  // [[freq_hz, db], ...] 256 log-spaced points
   var snapshotFreqData = null;  // [[freq_hz, db], ...] before-snapshot points
+  var drySpectrumData  = null;  // [[freq_hz, dbfs], ...] raw input spectrum (gray background)
+  var wetSpectrumData  = null;  // [[freq_hz, dbfs], ...] raw output spectrum (blue background)
   var thdData          = null;  // {percent: float, harmonics: [[hz, amp], ...]}
   var phaseData        = null;  // [[freq_hz, degrees], ...] 256 points
   var dynamicsData     = null;  // {running: bool, progress: int, points: [[in_db, out_db], ...]}
@@ -1831,6 +1915,15 @@
     // Only redraw if Before-After mode is active — snapshot is irrelevant otherwise
     if (tabKeys[state.analysisType] === 'frequency' && state.comparison === 2)
       drawGraph('frequency', true);
+  }
+
+  function handleDrySpectrum(data) {
+    drySpectrumData = data;
+    // No standalone redraw — spectrum is a background layer drawn by handleFreqResponse
+  }
+
+  function handleWetSpectrum(data) {
+    wetSpectrumData = data;
   }
 
   function handleThdResult(data) {
@@ -2275,103 +2368,232 @@
   }
 
   function updateSummaryText() {
-    // Summary panel only visible in Simplified view (viewMode 0)
     if (state.viewMode !== 0) return;
-    if (!liveFreqData && !thdData && !dynamicsData && !latencyData) return;
 
-    var name  = loadedPluginNameA || 'This plugin';
-    var bands = liveFreqData ? _freqBandAverages(liveFreqData) : null;
-    var tonal = bands ? _freqTonal(bands) : null;
-    var thd   = _thdAnalysis(thdData);
-    var dyn   = _dynAnalysis(dynamicsData);
-    var lat   = _latAnalysis(latencyData);
+    var name = loadedPluginNameA || 'This plugin';
+    var tab  = tabKeys[state.analysisType] || 'frequency';
+    var musical = '', practical = '', educational = '';
 
-    /* ---- Musical ---- */
-    var musical = [];
-    if (tonal)
-      musical.push(name + ' has a ' + tonal + ' character.');
-    if (thd && thd.level === 'transparent')
-      musical.push('Harmonically clean - what goes in comes out unchanged.');
-    else if (thd)
-      musical.push('Adds ' + thd.level + ', ' + thd.warmth + ' saturation'
-        + (thd.evenAmp >= thd.oddAmp ? ' - smooth and analog-flavored.' : ' - edgy and present.'));
-    if (dyn && dyn.level !== 'transparent')
-      musical.push('Dynamics feel ' + dyn.level
-        + (dyn.level === 'gentle' ? ' - natural-sounding control.'
-         : dyn.level === 'moderate' ? ' - adds punch and glue.'
-         : ' - strongly shapes the envelope.'));
-    else if (dyn)
-      musical.push('Dynamics are untouched - fully transparent gain staging.');
-    if (!musical.length)
-      musical.push('Load a plugin and click Analyze to see its musical character.');
+    // ── FREQUENCY ──────────────────────────────────────────────────────────
+    if (tab === 'frequency') {
+      var bands = liveFreqData ? _freqBandAverages(liveFreqData) : null;
+      var tonal = bands ? _freqTonal(bands) : null;
 
-    /* ---- Practical ---- */
-    var practical = [];
-    if (bands) {
-      practical.push('Frequency balance: lows ' + _fmtDb(bands.lowAvg)
-        + ', mids ' + _fmtDb(bands.midAvg) + ', highs ' + _fmtDb(bands.highAvg) + ' (band averages).');
-      if (bands.lowAvg > bands.midAvg + 2)
-        practical.push('Significant bass boost - consider a high-pass filter on stacked tracks to maintain clarity.');
-      if (bands.highAvg > bands.midAvg + 2)
-        practical.push('Elevated highs - watch for harshness on vocals and cymbals at high input levels.');
-      if (bands.midAvg < bands.lowAvg - 1.5 && bands.midAvg < bands.highAvg - 1.5)
-        practical.push('Scooped mids suit guitars and room mics but reduce presence on lead elements.');
-    }
-    if (thd) {
-      var thdAdvice;
-      if      (thd.level === 'transparent' || thd.level === 'very low') thdAdvice = 'no audible coloration.';
-      else if (thd.level === 'subtle')      thdAdvice = 'useful light warmth on buses.';
-      else if (thd.level === 'moderate')    thdAdvice = 'audible on transients - good for mix bus glue.';
-      else                                  thdAdvice = 'strong effect - use intentionally as a saturation tool.';
-      practical.push('THD: ' + thd.pct.toFixed(3) + '% - ' + thdAdvice);
-    }
-    if (dyn)
-      practical.push('Gain reduction at -30 dBFS: ' + _fmtDb(dyn.gr) + ' (' + dyn.level + ' compression).');
-    if (lat)
-      practical.push('Latency: ' + lat.ms.toFixed(2) + ' ms (' + lat.samples + ' samples) - '
-        + (lat.level === 'undetectable' || lat.level === 'imperceptible'
-           ? 'safe for real-time use.' : 'consider PDC compensation in your DAW.'));
-    if (!practical.length)
-      practical.push('Practical impact - how this plugin behaves in a mix - appears here after analysis.');
-
-    /* ---- Educational ---- */
-    var educational = [];
-    if (bands) {
-      educational.push('Frequency response compares plugin output to a flat input. '
-        + 'Measured bands: 20-300 Hz (low), 300 Hz-4 kHz (mid), 4-20 kHz (high). '
-        + 'Results: ' + _fmtDb(bands.lowAvg) + ' low, '
-        + _fmtDb(bands.midAvg) + ' mid, ' + _fmtDb(bands.highAvg) + ' high.');
-    }
-    if (thd) {
-      educational.push('THD (Total Harmonic Distortion) measures nonlinear coloration. '
-        + 'Even-order harmonics (2nd, 4th, 6th) produce warm, musical saturation typical of tube circuits. '
-        + 'Odd-order harmonics (3rd, 5th, 7th) create harder-sounding distortion associated with clipping. '
-        + 'Measured: ' + thd.pct.toFixed(3) + '% THD - ' + thd.warmth + '.');
-    }
-    if (dyn) {
-      educational.push('The dynamics transfer curve plots output level (Y) against input level (X). '
-        + 'The dashed diagonal is unity gain (no change). '
-        + 'Deviation below it indicates gain reduction. '
-        + 'Gain reduction at -30 dBFS: ' + _fmtDb(dyn.gr) + '.');
-    }
-    if (lat) {
-      if (state.comparison !== 0) {
-        educational.push('Latency is measured two ways: Method A reads the plugin\'s reported value via '
-          + 'getLatencySamples(); Method B correlates an impulse empirically through the signal path. '
-          + 'Disagreement between methods can indicate lookahead or PDC miscalculation. '
-          + 'Result: ' + lat.ms.toFixed(2) + ' ms (' + lat.samples + ' samples).');
+      if (tonal) {
+        musical = name + ' has a ' + tonal + ' character. ';
+        if (bands.lowAvg > bands.midAvg + 2)
+          musical += 'The low end is prominent — it will add body and weight to the signal.';
+        else if (bands.highAvg > bands.midAvg + 2)
+          musical += 'The top end is lifted — expect extra air and presence.';
+        else if (bands.midAvg < bands.lowAvg - 1.5 && bands.midAvg < bands.highAvg - 1.5)
+          musical += 'Mids are scooped — sounds wide and open but can lose vocal presence in a dense mix.';
+        else
+          musical += 'Balanced across the spectrum — works well on most sources without fighting the mix.';
       } else {
-        educational.push('Latency is the delay introduced between input and output. '
-          + 'It is measured by correlating an impulse through the signal path. '
-          + 'Result: ' + lat.ms.toFixed(2) + ' ms (' + lat.samples + ' samples).');
+        musical = 'Switch to Frequency analysis and click Analyze to see the tonal character of ' + name + '.';
+      }
+
+      if (bands) {
+        practical = 'Band averages — Low (20-300 Hz): ' + _fmtDb(bands.lowAvg)
+          + ',  Mid (300 Hz-4 kHz): ' + _fmtDb(bands.midAvg)
+          + ',  High (4-20 kHz): ' + _fmtDb(bands.highAvg) + '.';
+        if (bands.lowAvg > bands.midAvg + 2)
+          practical += '  Significant bass boost — consider a high-pass filter on stacked tracks to maintain clarity.';
+        if (bands.highAvg > bands.midAvg + 2)
+          practical += '  Elevated highs — watch for harshness on vocals and cymbals at high input levels.';
+        if (bands.midAvg < bands.lowAvg - 1.5 && bands.midAvg < bands.highAvg - 1.5)
+          practical += '  Scooped mids suit guitars and room mics but reduce presence on lead elements.';
+      } else {
+        practical = 'Run Frequency analysis to see band-level averages and mix placement advice.';
+      }
+
+      if (bands) {
+        educational = 'The frequency response graph shows the transfer function H(f) = Wet \u00F7 Dry — '
+          + 'how much the plugin boosts or cuts each frequency relative to a flat input. '
+          + '0 dB means the plugin passes that frequency unchanged. '
+          + 'Measured with a log sine sweep (20 Hz\u2013' + (state.testSignal === 0 ? '20 kHz' : '20 kHz') + '), '
+          + 'averaged over 32 FFT frames to reduce noise. '
+          + 'Band results: ' + _fmtDb(bands.lowAvg) + ' low, '
+          + _fmtDb(bands.midAvg) + ' mid, ' + _fmtDb(bands.highAvg) + ' high.';
+      } else {
+        educational = 'The frequency response measures the transfer function H(f) = Wet \u00F7 Dry using a log sine sweep. '
+          + 'A flat line at 0 dB means the plugin is transparent. Peaks and dips show boosts and cuts. '
+          + 'Run analysis to see results.';
       }
     }
-    if (!educational.length)
-      educational.push('Technical explanations of filter topology, phase behavior, and harmonic content appear here after analysis.');
 
-    document.getElementById('summary-musical').textContent     = musical.join('  ');
-    document.getElementById('summary-practical').textContent   = practical.join('  ');
-    document.getElementById('summary-educational').textContent = educational.join('  ');
+    // ── DYNAMICS ───────────────────────────────────────────────────────────
+    else if (tab === 'dynamics') {
+      var dyn = _dynAnalysis(dynamicsData);
+
+      if (dynamicsData && dynamicsData.running) {
+        musical    = 'Sweep in progress\u2026 measuring how ' + name + ' responds at each input level.';
+        practical  = 'The plugin is being driven from \u221260 dBFS to 0 dBFS in 1 dB steps. Each step settles for 100 ms before measuring.';
+        educational = 'The dynamics sweep injects a 1 kHz sine tone at stepped levels and records the RMS output at each point. '
+          + 'This builds the gain transfer curve you see on the graph.';
+      } else if (dyn) {
+        var feel = dyn.level === 'transparent' ? 'completely transparent \u2014 dynamics are untouched'
+                 : dyn.level === 'gentle'      ? 'gently controlled \u2014 natural and unobtrusive'
+                 : dyn.level === 'moderate'    ? 'noticeably compressed \u2014 adds punch and glue'
+                 : dyn.level === 'heavy'       ? 'heavily compressed \u2014 strong envelope shaping'
+                 :                              'limited \u2014 hard ceiling on output level';
+        musical = name + ' feels ' + feel + '.';
+        if (dyn.level !== 'transparent')
+          musical += '  At \u221230 dBFS input the gain is reduced by ' + _fmtDb(Math.abs(dyn.gr)) + '.';
+
+        practical = 'Gain reduction at \u221230 dBFS: ' + _fmtDb(dyn.gr) + ' (' + dyn.level + ').';
+        if (dyn.level === 'gentle')
+          practical += '  Low gain reduction \u2014 safe as a transparent leveler or bus glue.';
+        else if (dyn.level === 'moderate')
+          practical += '  Moderate gain reduction \u2014 use on drums and buses for controlled punch.';
+        else if (dyn.level === 'heavy' || dyn.level === 'limiting')
+          practical += '  Heavy processing \u2014 check that the attack and release settings suit your source material.';
+
+        educational = 'The dynamics transfer curve plots output level (Y-axis) vs input level (X-axis). '
+          + 'The diagonal line is unity gain \u2014 output equals input. '
+          + 'When the curve bends below the diagonal, the plugin is reducing gain (compression or limiting). '
+          + 'Measured gain reduction at \u221230 dBFS: ' + _fmtDb(dyn.gr) + '.';
+      } else {
+        musical    = 'Switch to Dynamics analysis and click Analyze to measure how ' + name + ' shapes the signal envelope.';
+        practical  = 'The sweep takes about 20 seconds and drives the plugin from \u221260 to 0 dBFS in 1 dB steps.';
+        educational = 'Dynamics analysis runs a stepped 1 kHz sine sweep to build the gain transfer curve. '
+          + 'It reveals compressors, limiters, expanders, and gates by showing how output level tracks input level.';
+      }
+    }
+
+    // ── DISTORTION ─────────────────────────────────────────────────────────
+    else if (tab === 'distortion') {
+      var thd = _thdAnalysis(thdData);
+
+      if (thd) {
+        if (thd.level === 'transparent' || thd.level === 'very low') {
+          musical = name + ' is harmonically clean \u2014 what goes in comes out unchanged. '
+            + 'No audible coloration from distortion.';
+        } else {
+          var flavor = thd.evenAmp >= thd.oddAmp
+            ? 'warm, smooth saturation \u2014 even-order harmonics dominate, similar to tube circuits'
+            : 'gritty, edgy saturation \u2014 odd-order harmonics dominate, similar to transistor clipping';
+          musical = name + ' adds ' + thd.level + ' ' + flavor + '.  '
+            + 'THD: ' + thd.pct.toFixed(3) + '%.';
+        }
+
+        var thdAdvice = thd.level === 'transparent' || thd.level === 'very low'
+          ? 'Transparent \u2014 no audible coloration. Safe on any source.'
+          : thd.level === 'subtle'   ? 'Subtle warmth \u2014 good on vocals, acoustic instruments, and mix buses.'
+          : thd.level === 'moderate' ? 'Audible on transients \u2014 useful as a mix bus glue or character device.'
+          : 'Strong saturation \u2014 use intentionally as an effect rather than a transparent processor.';
+        practical = 'THD: ' + thd.pct.toFixed(3) + '%.  ' + thdAdvice;
+        if (thdData && thdData.harmonics && thdData.harmonics.length > 1) {
+          var h2 = thdData.harmonics[1] ? thdData.harmonics[1][1].toFixed(1) + ' dB' : 'n/a';
+          var h3 = thdData.harmonics[2] ? thdData.harmonics[2][1].toFixed(1) + ' dB' : 'n/a';
+          practical += '  2nd harmonic: ' + h2 + ',  3rd harmonic: ' + h3 + '.';
+        }
+
+        educational = 'THD (Total Harmonic Distortion) measures nonlinear coloration. '
+          + 'A 1 kHz sine tone is injected and the output spectrum is analyzed for harmonics at 2 kHz, 3 kHz, etc. '
+          + 'Even-order harmonics (2nd, 4th\u2026) are perceptually warm and musical \u2014 typical of tube amplifiers. '
+          + 'Odd-order harmonics (3rd, 5th\u2026) sound harsher \u2014 associated with transistor clipping and digital saturation. '
+          + 'Measured result: ' + thd.pct.toFixed(3) + '% THD \u2014 character: ' + thd.warmth + '.';
+      } else {
+        musical    = 'Switch to Distortion analysis and click Analyze to hear how ' + name + ' colors the harmonics.';
+        practical  = 'A 1 kHz sine is injected through the plugin and the output spectrum is examined for harmonic content.';
+        educational = 'THD measures how much harmonic content the plugin adds to a pure sine tone. '
+          + 'Even harmonics sound warm; odd harmonics sound gritty. Both contribute to the character of the plugin.';
+      }
+    }
+
+    // ── PHASE ──────────────────────────────────────────────────────────────
+    else if (tab === 'phase') {
+      var hasPhase = phaseData && phaseData.length > 0;
+
+      if (hasPhase) {
+        // Sample phase shift at a few diagnostic frequencies
+        function _phaseAt(hz) {
+          if (!phaseData) return null;
+          var best = null, bestDist = Infinity;
+          for (var i = 0; i < phaseData.length; i++) {
+            var d = Math.abs(phaseData[i][0] - hz);
+            if (d < bestDist) { bestDist = d; best = phaseData[i][1]; }
+          }
+          return best !== null ? Math.round(best) : null;
+        }
+        var p1k  = _phaseAt(1000);
+        var p10k = _phaseAt(10000);
+        var p100 = _phaseAt(100);
+
+        var phaseDesc = (p1k !== null && Math.abs(p1k) < 10)
+          ? 'near-linear phase response \u2014 minimal phase distortion across the spectrum'
+          : (p1k !== null && Math.abs(p1k) < 45)
+          ? 'moderate phase shift \u2014 typical of minimum-phase EQ and filters'
+          : 'significant phase rotation \u2014 characteristic of steep filters or all-pass networks';
+        musical = name + ' has a ' + phaseDesc + '.  '
+          + 'In a mix, heavy phase rotation can cause comb filtering when layered with an unprocessed version.';
+
+        practical = 'Phase at 100 Hz: ' + (p100 !== null ? p100 + '\u00B0' : 'n/a')
+          + ',  1 kHz: ' + (p1k  !== null ? p1k  + '\u00B0' : 'n/a')
+          + ',  10 kHz: ' + (p10k !== null ? p10k + '\u00B0' : 'n/a') + '.';
+        if (p1k !== null && Math.abs(p1k) > 90)
+          practical += '  Large phase shift at 1 kHz \u2014 phase-align with the dry signal if using parallel processing.';
+        else if (p1k !== null && Math.abs(p1k) < 15)
+          practical += '  Very small phase shift \u2014 safe for parallel processing without time-aligning.';
+
+        educational = 'The phase response shows how much the plugin delays each frequency (in degrees) relative to the input. '
+          + '0\u00B0 everywhere is linear phase \u2014 all frequencies arrive at the output simultaneously. '
+          + 'Minimum-phase designs rotate phase progressively, which is inaudible on most signals but can cause '
+          + 'comb filtering in parallel processing. '
+          + 'Group delay (rate of phase change with frequency) shows whether the delay is constant across the band.';
+      } else {
+        musical    = 'Switch to Phase analysis and click Analyze to see how ' + name + ' shifts the phase of each frequency.';
+        practical  = 'Phase issues matter most in parallel processing and mid/side setups where processed and dry signals are summed.';
+        educational = 'Phase response measures the time delay (in degrees) the plugin introduces per frequency. '
+          + 'Linear phase means all frequencies are delayed equally. Minimum phase means low frequencies are delayed more than high.';
+      }
+    }
+
+    // ── LATENCY ────────────────────────────────────────────────────────────
+    else if (tab === 'latency') {
+      var lat = _latAnalysis(latencyData);
+
+      if (lat && lat.ms > 0) {
+        var playable = lat.level === 'undetectable' || lat.level === 'imperceptible'
+          ? 'perfectly playable in real time \u2014 latency is below the perceptible threshold'
+          : lat.level === 'low'
+          ? 'playable for most players \u2014 slight delay but unlikely to be distracting'
+          : lat.level === 'moderate'
+          ? 'noticeable during live playing \u2014 recommended to disable monitoring through this plugin while recording'
+          : 'high latency \u2014 not suitable for real-time monitoring; use a dry monitoring path while recording';
+        musical = name + ' is ' + playable + '.  '
+          + 'Reported delay: ' + lat.ms.toFixed(2) + ' ms (' + lat.samples + ' samples).';
+
+        practical = 'Latency: ' + lat.ms.toFixed(2) + ' ms (' + lat.samples + ' samples).  '
+          + (lat.level === 'undetectable' || lat.level === 'imperceptible'
+            ? 'No PDC compensation needed \u2014 safe for real-time use.'
+            : lat.level === 'low'
+            ? 'Enable PDC (Plug-in Delay Compensation) in your DAW to keep tracks time-aligned.'
+            : 'Enable PDC and avoid monitoring through this plugin while tracking.');
+        if (latencyData && latencyData.methodA > 0 && latencyData.methodB > 0) {
+          var diff = Math.abs(latencyData.methodA - latencyData.methodB);
+          if (diff > 10)
+            practical += '  Methods A and B disagree by ' + diff + ' samples \u2014 the plugin may have lookahead or non-standard PDC reporting.';
+        }
+
+        educational = 'Latency is measured two ways. '
+          + 'Method A reads the value the plugin reports via getLatencySamples() \u2014 what the DAW uses for PDC. '
+          + 'Method B is empirical: a Dirac impulse is injected and the output is scanned for the first peak above \u221260 dBFS. '
+          + 'If the two methods disagree, the plugin may have lookahead processing or may be mis-reporting its latency to the host. '
+          + 'Result: ' + lat.ms.toFixed(2) + ' ms (Method A: ' + latencyData.methodA + ' samples, Method B: '
+          + (latencyData.methodB || 'n/a') + ' samples).';
+      } else {
+        musical    = 'Switch to Latency analysis and click Analyze to check whether ' + name + ' is safe for real-time monitoring.';
+        practical  = 'Latency above ~10 ms is noticeable during live playing. Above ~20 ms it will feel sluggish and should be compensated by your DAW.';
+        educational = 'Latency is measured in two ways: Method A reads getLatencySamples() (the value the plugin self-reports), '
+          + 'Method B injects an impulse and measures empirically. Comparing both reveals lookahead or PDC mis-reporting.';
+      }
+    }
+
+    document.getElementById('summary-musical').textContent     = musical;
+    document.getElementById('summary-practical').textContent   = practical;
+    document.getElementById('summary-educational').textContent = educational;
   }
 
   /* ================================================================

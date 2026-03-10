@@ -860,14 +860,16 @@ void PluginScopeAudioProcessorEditor::timerCallback()
         webView->evaluateJavascript (js, [] (juce::WebBrowserComponent::EvaluationResult) {});
     };
 
-    // Build compact [[freq_hz, value], ...] JSON log-spaced across 20-20000 Hz.
-    // Uses binary search on the source vector (sorted ascending by .first = Hz).
+    // Build compact [[freq_hz, value], ...] JSON log-spaced across 6-30000 Hz.
+    // Uses linear interpolation between adjacent FFT bins so that the many
+    // log-spaced output points below ~300 Hz (where bin width > step width)
+    // get smoothly varying values rather than staircased plateaus.
     auto logSpacedJson = [] (const std::vector<std::pair<float,float>>& data, int n) -> juce::String
     {
         if (data.empty()) return "null";
 
-        const float minL = std::log10 (20.0f);
-        const float maxL = std::log10 (20000.0f);
+        const float minL = std::log10 (6.0f);
+        const float maxL = std::log10 (30000.0f);
         juce::String j ("[");
         bool firstPt = true;
 
@@ -879,13 +881,29 @@ void PluginScopeAudioProcessorEditor::timerCallback()
             while (lo < hi)
             {
                 const int mid = (lo + hi) / 2;
-                if (data[mid].first < f) lo = mid + 1;
-                else                     hi = mid;
+                if (data[(size_t) mid].first < f) lo = mid + 1;
+                else                              hi = mid;
+            }
+
+            // Linear interpolation between the two bracketing bins.
+            // t is clamped to [0,1] so queries above Nyquist (where lo is
+            // pinned to the last bin) don't extrapolate into garbage values.
+            float db = data[(size_t) lo].second;
+            if (lo > 0)
+            {
+                const float f0 = data[(size_t)(lo - 1)].first;
+                const float f1 = data[(size_t) lo       ].first;
+                if (f1 > f0)
+                {
+                    const float t = juce::jlimit (0.0f, 1.0f, (f - f0) / (f1 - f0));
+                    db = data[(size_t)(lo - 1)].second * (1.0f - t)
+                       + data[(size_t) lo       ].second * t;
+                }
             }
 
             if (!firstPt) j += ",";
-            j += "[" + juce::String (f,             0)
-               + "," + juce::String (data[lo].second, 2) + "]";
+            j += "[" + juce::String (f,  0)
+               + "," + juce::String (db, 2) + "]";
             firstPt = false;
         }
 
@@ -898,6 +916,19 @@ void PluginScopeAudioProcessorEditor::timerCallback()
         if (!d.empty())
             call ("if(typeof handleFreqResponse==='function')"
                   "handleFreqResponse(" + logSpacedJson (d, 256) + ");");
+    }
+
+    // === Raw Spectrum — dry (gray) + wet (blue) background display ===========
+    {
+        const auto dry = processorRef.getDrySpectrum();
+        if (!dry.empty())
+            call ("if(typeof handleDrySpectrum==='function')"
+                  "handleDrySpectrum(" + logSpacedJson (dry, 256) + ");");
+
+        const auto wet = processorRef.getWetSpectrum();
+        if (!wet.empty())
+            call ("if(typeof handleWetSpectrum==='function')"
+                  "handleWetSpectrum(" + logSpacedJson (wet, 256) + ");");
     }
 
     // === Plugin B Frequency Response (every tick when B loaded) =============
@@ -1079,10 +1110,10 @@ void PluginScopeAudioProcessorEditor::performExport (const juce::File& destFile)
     {
         csv << (hasB ? "freq_hz,mag_db_A,mag_db_B\n" : "freq_hz,mag_db\n");
 
-        // Log-space 512 points across 20–20000 Hz using binary search on source
+        // Log-space 512 points across 6–30000 Hz using binary search on source
         const int kPoints = 512;
-        const float minL  = std::log10 (20.0f);
-        const float maxL  = std::log10 (20000.0f);
+        const float minL  = std::log10 (6.0f);
+        const float maxL  = std::log10 (30000.0f);
 
         for (int i = 0; i < kPoints; ++i)
         {
@@ -1117,8 +1148,8 @@ void PluginScopeAudioProcessorEditor::performExport (const juce::File& destFile)
         csv << "freq_hz,mag_db\n";
 
         const int kPoints = 512;
-        const float minL  = std::log10 (20.0f);
-        const float maxL  = std::log10 (20000.0f);
+        const float minL  = std::log10 (6.0f);
+        const float maxL  = std::log10 (30000.0f);
 
         for (int i = 0; i < kPoints; ++i)
         {
@@ -1168,8 +1199,8 @@ void PluginScopeAudioProcessorEditor::performExport (const juce::File& destFile)
         csv << (hasB ? "freq_hz,phase_deg_A,phase_deg_B\n" : "freq_hz,phase_deg\n");
 
         const int kPoints = 512;
-        const float minL  = std::log10 (20.0f);
-        const float maxL  = std::log10 (20000.0f);
+        const float minL  = std::log10 (6.0f);
+        const float maxL  = std::log10 (30000.0f);
 
         for (int i = 0; i < kPoints; ++i)
         {

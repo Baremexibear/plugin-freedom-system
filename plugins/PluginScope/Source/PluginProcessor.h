@@ -81,6 +81,11 @@ public:
     // Returns (frequency_hz, magnitude_db) pairs for kFreqBins bins.
     std::vector<std::pair<float,float>> getFreqResponse() const;
 
+    // Real-time spectrum (raw FFT magnitude) for the Pro-Q-style background display.
+    // drySpectrum = input signal, wetSpectrum = post-plugin signal, both in dBFS.
+    std::vector<std::pair<float,float>> getDrySpectrum() const;
+    std::vector<std::pair<float,float>> getWetSpectrum() const;
+
     //==========================================================================
     // Phase 3.4: THD result accessors (thread-safe, protected by resultMutex)
     // Returns (harmonic_number 1..8, amplitude_db) pairs.
@@ -253,6 +258,12 @@ private:
     std::vector<std::pair<float,float>> freqResponseResult;   // (freq_hz, mag_db) per bin
     std::vector<std::pair<float,float>> freqResponseAccum;    // Running average accumulator
     int freqResponseFrameCount { 0 };
+
+    // Raw spectrum (dBFS) for background spectrum display — protected by resultMutex
+    std::vector<std::pair<float,float>> drySpectrumResult;
+    std::vector<std::pair<float,float>> wetSpectrumResult;
+    std::vector<std::pair<float,float>> drySpectrumAccum;
+    std::vector<std::pair<float,float>> wetSpectrumAccum;
 
     // Plugin B freq response result — computed alongside A when B is loaded
     std::vector<std::pair<float,float>> freqResponseResultB;

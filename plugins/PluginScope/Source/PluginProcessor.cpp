@@ -474,6 +474,15 @@ public:
             else if (analysisType == 1)   // Dynamics Curve (Phase 3.6)
             {
                 computeDynamicsSweep();
+
+                // One-shot: the sweep must NOT auto-restart.  Block here until
+                // the user clicks Analyze (analysisResetPending) or switches tabs.
+                while (!threadShouldExit()
+                       && static_cast<int> (proc.analysisTypeParam->load()) == 1
+                       && !proc.analysisResetPending.load())
+                {
+                    juce::Thread::sleep (100);
+                }
             }
             else if (analysisType == 2)   // Harmonic Distortion (Phase 3.4)
             {
@@ -568,6 +577,49 @@ private:
         {
             const juce::ScopedLock lock (proc.resultMutex);
             proc.freqResponseResult = proc.freqResponseAccum;
+        }
+
+        // === Raw spectrum (dBFS) — dry + wet, for background spectrum display =========
+        // Uses the same FFT buffers already computed above.
+        // Normalise by 2/N to convert FFT magnitudes to approximate dBFS.
+        {
+            const float norm = 2.0f / static_cast<float> (proc.kFftSize);
+            std::vector<std::pair<float,float>> dryFr (proc.kFreqBins);
+            std::vector<std::pair<float,float>> wetFr (proc.kFreqBins);
+
+            for (int bin = 0; bin < proc.kFreqBins; ++bin)
+            {
+                const float binHz = static_cast<float> (bin) * sampleRate
+                                    / static_cast<float> (proc.kFftSize);
+                const float dR = proc.fftDryBuf[(size_t)(bin * 2)];
+                const float dI = proc.fftDryBuf[(size_t)(bin * 2 + 1)];
+                const float wR = proc.fftWetBuf[(size_t)(bin * 2)];
+                const float wI = proc.fftWetBuf[(size_t)(bin * 2 + 1)];
+                dryFr[bin] = { binHz, 20.0f * std::log10 (std::sqrt (dR*dR + dI*dI) * norm + 1e-10f) };
+                wetFr[bin] = { binHz, 20.0f * std::log10 (std::sqrt (wR*wR + wI*wI) * norm + 1e-10f) };
+            }
+
+            // 8-frame EMA — faster response than the transfer function average
+            const float alpha = 0.125f;
+            if (proc.drySpectrumAccum.size() != (size_t) proc.kFreqBins)
+            {
+                proc.drySpectrumAccum = dryFr;
+                proc.wetSpectrumAccum = wetFr;
+            }
+            else
+            {
+                for (int bin = 0; bin < proc.kFreqBins; ++bin)
+                {
+                    proc.drySpectrumAccum[(size_t) bin].second +=
+                        alpha * (dryFr[(size_t) bin].second - proc.drySpectrumAccum[(size_t) bin].second);
+                    proc.wetSpectrumAccum[(size_t) bin].second +=
+                        alpha * (wetFr[(size_t) bin].second - proc.wetSpectrumAccum[(size_t) bin].second);
+                }
+            }
+
+            const juce::ScopedLock lock (proc.resultMutex);
+            proc.drySpectrumResult = proc.drySpectrumAccum;
+            proc.wetSpectrumResult = proc.wetSpectrumAccum;
         }
 
         // === Plugin B freq response (computed in the same pass when B is active) ===
@@ -1039,8 +1091,9 @@ private:
 
         for (int step = 0; step < numSteps && ! threadShouldExit(); ++step)
         {
-            // Abort if the user switched to a different analysis type mid-sweep.
-            if ((int) proc.analysisTypeParam->load() != 1)
+            // Abort if the user switched tabs or clicked Analyze to restart.
+            if ((int) proc.analysisTypeParam->load() != 1
+                || proc.analysisResetPending.load())
                 break;
 
             const float inputDb     = kStartDb + (float) step * kStepDb;
@@ -1059,7 +1112,9 @@ private:
             if (bActive) flushCaptureFifoB();
 
             // Safety check before measuring.
-            if (threadShouldExit() || (int) proc.analysisTypeParam->load() != 1)
+            if (threadShouldExit()
+                || (int) proc.analysisTypeParam->load() != 1
+                || proc.analysisResetPending.load())
                 break;
 
             // Accumulate measurement window and compute RMS for both A and B.
@@ -1565,6 +1620,18 @@ std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getFreqResponse()
 {
     const juce::ScopedLock lock (resultMutex);
     return freqResponseResult;
+}
+
+std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getDrySpectrum() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return drySpectrumResult;
+}
+
+std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getWetSpectrum() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return wetSpectrumResult;
 }
 
 //==============================================================================
@@ -2073,16 +2140,46 @@ static juce::PluginDescription resolveVST3Description (
         juce::OwnedArray<juce::PluginDescription> fresh;
         fmt->findAllTypesForFile (fresh, desc.fileOrIdentifier);
 
+        // Log what the factory actually returned — helps diagnose name mismatches
+        juce::Logger::writeToLog ("[PluginScope] resolveVST3: factory returned "
+            + juce::String (fresh.size()) + " class(es) for \"" + desc.name + "\"");
+        for (auto* d : fresh)
+            juce::Logger::writeToLog ("[PluginScope]   factory name=\"" + d->name + "\"");
+
+        // 1. Exact name match
         for (auto* d : fresh)
         {
             if (d->name.trim() == desc.name.trim())
             {
                 juce::Logger::writeToLog ("[PluginScope] resolved VST3 IDs for \""
-                    + desc.name + "\": uniqueId=" + juce::String (d->uniqueId)
+                    + desc.name + "\" (exact): uniqueId=" + juce::String (d->uniqueId)
                     + " deprecatedUid=" + juce::String (d->deprecatedUid));
                 return *d;
             }
         }
+
+        // 2. Case-insensitive match — handles capitalisation differences
+        for (auto* d : fresh)
+        {
+            if (d->name.trim().equalsIgnoreCase (desc.name.trim()))
+            {
+                juce::Logger::writeToLog ("[PluginScope] resolved VST3 IDs for \""
+                    + desc.name + "\" (case-insensitive): factory name=\"" + d->name + "\"");
+                return *d;
+            }
+        }
+
+        // 3. Single-plugin bundle — the bundle contains exactly one class so the
+        //    name mismatch (e.g. scan cache has "FabFilter Pro-C 2", factory
+        //    returns "Pro-C 2") is irrelevant; just use the live factory description.
+        if (fresh.size() == 1)
+        {
+            juce::Logger::writeToLog ("[PluginScope] resolved VST3 IDs for \""
+                + desc.name + "\" (single-class fallback): factory name=\""
+                + fresh[0]->name + "\"");
+            return *fresh[0];
+        }
+
         break;
     }
 

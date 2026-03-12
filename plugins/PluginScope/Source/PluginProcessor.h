@@ -91,6 +91,8 @@ public:
     // Returns (harmonic_number 1..8, amplitude_db) pairs.
     std::vector<std::pair<int,float>> getThdHarmonics() const;
     float getThdPercent() const;
+    std::vector<std::pair<int,float>> getThdHarmonicsB() const;
+    float getThdPercentB() const;
 
     //==========================================================================
     // Phase 3.5: Phase response accessors (thread-safe, protected by resultMutex)
@@ -107,6 +109,7 @@ public:
     // Plugin B measurement accessors — parallel results for A/B comparison view.
     // Each mirrors the corresponding Plugin A accessor but reads from B result storage.
     std::vector<std::pair<float,float>> getFreqResponseB() const;
+    std::vector<std::pair<float,float>> getWetSpectrumB() const;
     std::vector<std::pair<float,float>> getPhaseResponseB() const;
     std::vector<std::pair<float,float>> getDynamicsResultB() const;
     int  getDynamicsSweepProgress() const { return dynamicsSweepProgress.load(); }
@@ -269,6 +272,8 @@ private:
     std::vector<std::pair<float,float>> freqResponseResultB;
     std::vector<std::pair<float,float>> freqResponseAccumB;
     int freqResponseFrameCountB { 0 };
+    std::vector<std::pair<float,float>> wetSpectrumResultB;
+    std::vector<std::pair<float,float>> wetSpectrumAccumB;
 
     mutable juce::CriticalSection resultMutex;
 
@@ -292,6 +297,8 @@ private:
     // THD results (protected by resultMutex, same lock as freqResponseResult)
     std::vector<std::pair<int,float>> thdHarmonics;   // (harmonic_number 1..8, amplitude_db)
     float thdPercent { 0.0f };
+    std::vector<std::pair<int,float>> thdHarmonicsB;  // Plugin B
+    float thdPercentB { 0.0f };
 
     //==========================================================================
     // Phase 3.5: Phase Response + Group Delay results (protected by resultMutex)

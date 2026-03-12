@@ -1467,14 +1467,14 @@
 
     if (type === 'frequency') {
       drawSpectrumBg(W, H);
-      drawFrequencyCurve(W, H, '#0A84FF', 'rgba(10,132,255,0.28)', 'rgba(10,132,255,0.0)', false);
-      if (isAB)
-        // A/B Plugins: second curve is live Plugin B data
-        drawFrequencyCurveB(W, H, '#FF9F0A', 'rgba(255,159,10,0.18)', 'rgba(255,159,10,0.0)');
-      else if (isBeforeAfter && snapshotFreqData)
+      if (isBeforeAfter && snapshotFreqData)
         // Before-After: second curve is the frozen snapshot (amber, dashed)
         drawFrequencyCurve(W, H, '#FF9F0A', 'rgba(255,159,10,0.12)', 'rgba(255,159,10,0.0)', true);
     } else if (type === 'dynamics') {
+      // Unity-gain diagonal drawn once, before the curves
+      ctx.strokeStyle = '#3C3C3E'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(0, H); ctx.lineTo(W, 0); ctx.stroke();
+      ctx.setLineDash([]);
       drawDynamicsCurve(W, H, '#0A84FF', false);
       if (isAB) drawDynamicsCurve(W, H, '#FF9F0A', true);
       // Before-After has no dynamics snapshot — only single curve shown
@@ -1587,8 +1587,8 @@
       ctx.lineWidth = 1.2; ctx.setLineDash([]); ctx.stroke();
     }
 
-    // Wet spectrum — blue, slightly more prominent
-    var wetPts = specPoints(wetSpectrumData);
+    // Wet spectrum — blue, only shown when a plugin is loaded (otherwise identical to dry)
+    var wetPts = loadedPluginNameA ? specPoints(wetSpectrumData) : [];
     if (wetPts.length) {
       var wetGrad = ctx.createLinearGradient(0, 0, 0, H);
       wetGrad.addColorStop(0, 'rgba(10,132,255,0.22)');
@@ -1601,6 +1601,24 @@
       traceSmoothPath(wetPts);
       ctx.strokeStyle = 'rgba(10,132,255,0.5)';
       ctx.lineWidth = 1.2; ctx.setLineDash([]); ctx.stroke();
+    }
+
+    // Plugin B spectrum — orange, only in A/B mode
+    if (state.comparison === 1 && loadedPluginNameB) {
+      var wetPtsB = specPoints(wetSpectrumDataB);
+      if (wetPtsB.length) {
+        var wetGradB = ctx.createLinearGradient(0, 0, 0, H);
+        wetGradB.addColorStop(0, 'rgba(255,159,10,0.22)');
+        wetGradB.addColorStop(1, 'rgba(255,159,10,0.0)');
+        ctx.beginPath();
+        traceSmoothPath(wetPtsB);
+        ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
+        ctx.fillStyle = wetGradB; ctx.fill();
+        ctx.beginPath();
+        traceSmoothPath(wetPtsB);
+        ctx.strokeStyle = 'rgba(255,159,10,0.5)';
+        ctx.lineWidth = 1.2; ctx.setLineDash([]); ctx.stroke();
+      }
     }
   }
 
@@ -1677,26 +1695,24 @@
     var dataSource = offset ? dynamicsDataB : dynamicsData;
     var realPts = dataSource && dataSource.points && dataSource.points.length > 0
                   ? dataSource.points : null;
+    // Plugin B: only draw when real data exists — no fake demo curve
+    if (offset && !realPts) return;
     var points = [];
     if (realPts) {
-      // Real data: [[input_db, output_db], ...], range -60..0
       for (var i = 0; i < realPts.length; i++) {
         var xi = (realPts[i][0] + 60) / 60 * W;
         var yi = H - (realPts[i][1] + 60) / 60 * H;
         points.push([xi, yi]);
       }
     } else {
+      // Plugin A fallback: demo shape until Analyze is clicked
       for (var i = 0; i <= 200; i++) {
         var t = i / 200;
         var inputDb = -60 + t * 60;
-        var outputDb = dynamicsShape(inputDb, offset);
+        var outputDb = dynamicsShape(inputDb, false);
         points.push([t * W, H - (outputDb + 60) / 60 * H]);
       }
     }
-    // Unity-gain diagonal
-    ctx.strokeStyle = '#3C3C3E'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
-    ctx.beginPath(); ctx.moveTo(0, H); ctx.lineTo(W, 0); ctx.stroke();
-    ctx.setLineDash([]);
     if (!points.length) return;
     ctx.beginPath(); ctx.moveTo(points[0][0], points[0][1]);
     for (var i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
@@ -1712,38 +1728,51 @@
   }
 
   function drawDistortionBars(W, H) {
-    var freqsHz, amplitudes;
-    if (thdData && thdData.harmonics && thdData.harmonics.length > 0) {
-      // h[0] = harmonic number (1-8), multiply by fundamental (1 kHz) to get Hz
-      freqsHz = thdData.harmonics.map(function(h) { return h[0] * 1000; });
-      // h[1] = amplitude in dBFS — convert to linear then normalise relative to H1
-      var linAmps = thdData.harmonics.map(function(h) { return Math.pow(10, h[1] / 20); });
-      var h1Lin   = linAmps[0] || 1e-10;
-      amplitudes  = linAmps.map(function(a) { return a / h1Lin; });
-    } else {
-      // Demo fallback
-      freqsHz    = [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000];
-      amplitudes = [1.0, 0.09, 0.03, 0.015, 0.008, 0.004, 0.003, 0.002];
+    if (!thdData || !thdData.harmonics || thdData.harmonics.length === 0) {
+      ctx.fillStyle = '#3C3C3E';
+      ctx.font = '13px Inter, system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Click Analyze to measure harmonic distortion', W / 2, H * 0.45);
+      ctx.textAlign = 'left';
+      return;
     }
+
     var barW = W * 0.006;
-    freqsHz.forEach(function(f, idx) {
-      var x    = freqToX(f, W);
-      var barH = amplitudes[idx] * H * 0.8;
-      var y    = H - barH;
-      var grad = ctx.createLinearGradient(0, y, 0, H);
-      if (idx === 0) {
-        grad.addColorStop(0, '#0A84FF'); grad.addColorStop(1, 'rgba(10,132,255,0.3)');
-      } else {
-        grad.addColorStop(0, '#FF9F0A'); grad.addColorStop(1, 'rgba(255,159,10,0.2)');
-      }
-      ctx.fillStyle = grad; ctx.fillRect(x - barW / 2, y, barW, barH);
-    });
-    // THD % label — thdData.percent is already in % (e.g. 5.0 = 5%)
-    if (thdData && thdData.percent > 0) {
-      ctx.fillStyle = '#8E8E93';
-      ctx.font = '11px Inter, system-ui, sans-serif';
-      ctx.fillText('THD: ' + thdData.percent.toFixed(3) + '%', 8, 16);
+
+    // Helper: draw one set of harmonic bars in a single color
+    function drawBars(data, color, colorFade, xOffset) {
+      var linAmps = data.harmonics.map(function(h) { return Math.pow(10, h[1] / 20); });
+      var h1Lin   = linAmps[0] || 1e-10;
+      var amps    = linAmps.map(function(a) { return a / h1Lin; });
+      data.harmonics.forEach(function(h, idx) {
+        var x    = freqToX(h[0] * 1000, W) + xOffset;
+        var barH = amps[idx] * H * 0.8;
+        var y    = H - barH;
+        var grad = ctx.createLinearGradient(0, y, 0, H);
+        grad.addColorStop(0, color);
+        grad.addColorStop(1, colorFade);
+        ctx.fillStyle = grad;
+        ctx.globalAlpha = xOffset !== 0 ? 0.8 : 1.0;
+        ctx.fillRect(x - barW / 2, y, barW, barH);
+        ctx.globalAlpha = 1;
+      });
     }
+
+    var isAB = state.comparison === 1;
+
+    // Plugin A — blue, shift left in A/B mode
+    drawBars(thdData, '#0A84FF', 'rgba(10,132,255,0.2)', isAB ? -barW * 0.7 : 0);
+
+    // Plugin B — orange, only in A/B mode when data exists
+    if (isAB && thdDataB && thdDataB.harmonics && thdDataB.harmonics.length > 0)
+      drawBars(thdDataB, '#FF9F0A', 'rgba(255,159,10,0.2)', barW * 0.7);
+
+    // Labels
+    ctx.fillStyle = '#8E8E93';
+    ctx.font = '11px Inter, system-ui, sans-serif';
+    ctx.fillText('A  THD: ' + thdData.percent.toFixed(3) + '%', 8, 16);
+    if (isAB && thdDataB && thdDataB.percent !== undefined)
+      ctx.fillText('B  THD: ' + thdDataB.percent.toFixed(3) + '%', 8, 30);
   }
 
   // Wrap any phase value (degrees) to the canonical [-180, +180] range.
@@ -1892,11 +1921,13 @@
   var drySpectrumData  = null;  // [[freq_hz, dbfs], ...] raw input spectrum (gray background)
   var wetSpectrumData  = null;  // [[freq_hz, dbfs], ...] raw output spectrum (blue background)
   var thdData          = null;  // {percent: float, harmonics: [[hz, amp], ...]}
+  var thdDataB         = null;  // Plugin B THD
   var phaseData        = null;  // [[freq_hz, degrees], ...] 256 points
   var dynamicsData     = null;  // {running: bool, progress: int, points: [[in_db, out_db], ...]}
   var latencyData      = null;  // {methodA: int, methodB: int, msA: float, msB: float}
   // Plugin B parallel measurement data (populated by C++ when B is loaded and comparison is active)
   var liveFreqDataB    = null;  // [[freq_hz, db], ...] Plugin B frequency response
+  var wetSpectrumDataB = null;  // [[freq_hz, dbfs], ...] Plugin B raw output spectrum (orange background)
   var phaseDataB       = null;  // [[freq_hz, degrees], ...] Plugin B phase response
   var dynamicsDataB    = null;  // {running: bool, points: [[in_db, out_db], ...]} Plugin B dynamics
 
@@ -1919,18 +1950,31 @@
 
   function handleDrySpectrum(data) {
     drySpectrumData = data;
-    // No standalone redraw — spectrum is a background layer drawn by handleFreqResponse
+    if (tabKeys[state.analysisType] === 'frequency')
+      drawGraph('frequency', state.comparison !== 0);
   }
 
   function handleWetSpectrum(data) {
     wetSpectrumData = data;
   }
 
+  function handleWetSpectrumB(data) {
+    wetSpectrumDataB = data;
+    if (tabKeys[state.analysisType] === 'frequency' && state.comparison === 1)
+      drawGraph('frequency', true);
+  }
+
   function handleThdResult(data) {
     thdData = data;
     if (tabKeys[state.analysisType] === 'distortion')
-      drawGraph('distortion', false);
+      drawGraph('distortion', state.comparison !== 0);
     updateSummaryText();
+  }
+
+  function handleThdResultB(data) {
+    thdDataB = data;
+    if (tabKeys[state.analysisType] === 'distortion' && state.comparison === 1)
+      drawGraph('distortion', true);
   }
 
   // EMA blend factor for phase smoothing (lower = smoother but slower to respond)
@@ -2200,9 +2244,9 @@
       // Button state is restored by handleDynamicsResult() once sweep starts
     } else {
       // Freq / THD / Phase — clear stale data so graph blanks until fresh data arrives
-      if (tab === 'frequency') { liveFreqData = null; liveFreqDataB = null; }
+      if (tab === 'frequency') { liveFreqData = null; liveFreqDataB = null; wetSpectrumDataB = null; }
       if (tab === 'phase')     { phaseData    = null; phaseDataB    = null; }
-      if (tab === 'distortion') thdData = null;
+      if (tab === 'distortion') { thdData = null; thdDataB = null; drawGraph('distortion', state.comparison !== 0); }
       btn.textContent = 'Measuring\u2026';
       btn.style.background = '#30D158';
       // Restore after brief feedback — new data will arrive within ~200 ms
@@ -2334,12 +2378,19 @@
   function _dynAnalysis(data) {
     if (!data || !data.points || data.points.length < 5) return null;
     var pts = data.points;
-    // Find gain reduction around -30 dBFS input
-    var gr = null;
+    // Find the worst-case (maximum) gain reduction across all measured points.
+    // Using only -30 dBFS misses high-threshold compressors whose bend appears
+    // near 0 dBFS. We scan the top half of the input range (-30 to 0 dBFS)
+    // where compression typically acts, and report the most gain reduction seen.
+    var worstGr = 0;
     for (var i = 0; i < pts.length; i++) {
-      if (pts[i][0] >= -32 && pts[i][0] <= -28) { gr = pts[i][1] - pts[i][0]; break; }
+      if (pts[i][0] >= -30) {
+        var gr = pts[i][1] - pts[i][0];
+        if (gr < worstGr) worstGr = gr;
+      }
     }
-    if (gr === null) { var mid = Math.floor(pts.length / 2); gr = pts[mid][1] - pts[mid][0]; }
+    // Fall back to midpoint if no points in the upper range.
+    var gr = worstGr !== 0 ? worstGr : (pts[Math.floor(pts.length / 2)][1] - pts[Math.floor(pts.length / 2)][0]);
     var level;
     if      (gr > -0.3) level = 'transparent';
     else if (gr > -1.5) level = 'gentle';

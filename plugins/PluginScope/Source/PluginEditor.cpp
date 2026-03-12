@@ -931,12 +931,17 @@ void PluginScopeAudioProcessorEditor::timerCallback()
                   "handleWetSpectrum(" + logSpacedJson (wet, 256) + ");");
     }
 
-    // === Plugin B Frequency Response (every tick when B loaded) =============
+    // === Plugin B Frequency Response + Spectrum (every tick when B loaded) ==
     {
         const auto d = processorRef.getFreqResponseB();
         if (!d.empty())
             call ("if(typeof handleFreqResponseB==='function')"
                   "handleFreqResponseB(" + logSpacedJson (d, 256) + ");");
+
+        const auto wb = processorRef.getWetSpectrumB();
+        if (!wb.empty())
+            call ("if(typeof handleWetSpectrumB==='function')"
+                  "handleWetSpectrumB(" + logSpacedJson (wb, 256) + ");");
     }
 
     // === Snapshot Frequency Response (every tick while snapshot exists) =====
@@ -1000,7 +1005,7 @@ void PluginScopeAudioProcessorEditor::timerCallback()
     // === Slow measurements (every ~500 ms) ===================================
     if (slowTick)
     {
-        // THD
+        // THD — Plugin A
         {
             const auto  h   = processorRef.getThdHarmonics();
             const float pct = processorRef.getThdPercent();
@@ -1010,7 +1015,6 @@ void PluginScopeAudioProcessorEditor::timerCallback()
                 juce::String j ("{\"percent\":" + juce::String (pct, 4)
                               + ",\"harmonics\":[");
                 bool firstPt = true;
-
                 for (const auto& p : h)
                 {
                     if (!firstPt) j += ",";
@@ -1018,9 +1022,30 @@ void PluginScopeAudioProcessorEditor::timerCallback()
                        + "," + juce::String (p.second, 6) + "]";
                     firstPt = false;
                 }
-
                 j += "]}";
                 call ("if(typeof handleThdResult==='function')handleThdResult(" + j + ");");
+            }
+        }
+
+        // THD — Plugin B
+        {
+            const auto  hB   = processorRef.getThdHarmonicsB();
+            const float pctB = processorRef.getThdPercentB();
+
+            if (!hB.empty())
+            {
+                juce::String j ("{\"percent\":" + juce::String (pctB, 4)
+                              + ",\"harmonics\":[");
+                bool firstPt = true;
+                for (const auto& p : hB)
+                {
+                    if (!firstPt) j += ",";
+                    j += "[" + juce::String ((int) p.first)
+                       + "," + juce::String (p.second, 6) + "]";
+                    firstPt = false;
+                }
+                j += "]}";
+                call ("if(typeof handleThdResultB==='function')handleThdResultB(" + j + ");");
             }
         }
 

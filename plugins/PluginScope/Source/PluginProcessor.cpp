@@ -668,6 +668,28 @@ private:
 
             const juce::ScopedLock lock (proc.resultMutex);
             proc.freqResponseResultB = proc.freqResponseAccumB;
+
+            // Raw dBFS spectrum of Plugin B output — used for orange spectrum background
+            {
+                const float norm = 2.0f / static_cast<float> (proc.kFftSize);
+                std::vector<std::pair<float,float>> wetFrB (proc.kFreqBins);
+                for (int bin = 0; bin < proc.kFreqBins; ++bin)
+                {
+                    const float wR = proc.fftWetBuf[(size_t)(bin * 2)];
+                    const float wI = proc.fftWetBuf[(size_t)(bin * 2 + 1)];
+                    const float binHz = static_cast<float> (bin) * sampleRate
+                                        / static_cast<float> (proc.kFftSize);
+                    wetFrB[bin] = { binHz, 20.0f * std::log10 (std::sqrt (wR*wR + wI*wI) * norm + 1e-10f) };
+                }
+                const float alpha = 0.125f;
+                if (proc.wetSpectrumAccumB.size() != (size_t) proc.kFreqBins)
+                    proc.wetSpectrumAccumB = wetFrB;
+                else
+                    for (int bin = 0; bin < proc.kFreqBins; ++bin)
+                        proc.wetSpectrumAccumB[(size_t)bin].second +=
+                            alpha * (wetFrB[(size_t)bin].second - proc.wetSpectrumAccumB[(size_t)bin].second);
+                proc.wetSpectrumResultB = proc.wetSpectrumAccumB;
+            }
         }
 
         juce::Thread::sleep (5);   // ~200 Hz max analysis rate; UI will throttle further
@@ -751,11 +773,42 @@ private:
 
         const float thd = std::sqrt (harmonicSumSq) / h1Linear * 100.0f;
 
+        // Plugin B THD — measure if B has enough FIFO data
+        std::vector<std::pair<int,float>> harmonicsB;
+        float thdB = 0.0f;
+        if (proc.captureFifoB.getNumReady() / 2 >= needed)
+        {
+            // Reuse fftWetBuf (we've already consumed the A data above)
+            proc.readFifoIntoBuffer (proc.captureFifoB, proc.captureBufferB,
+                                     proc.fftWetBuf.data(), needed);
+            proc.windowFlatTop.multiplyWithWindowingTable (proc.fftWetBuf.data(),
+                                                           (size_t) proc.kFftSize);
+            proc.fft.performRealOnlyForwardTransform (proc.fftWetBuf.data(), true);
+
+            harmonicsB.reserve (8);
+            float h1B = 1e-10f, sumSqB = 0.0f;
+            for (int n = 1; n <= 8; ++n)
+            {
+                const float freqHz = proc.kThdFundamental * static_cast<float> (n);
+                if (freqHz >= sampleRate * 0.5f) break;
+                const float mag = getMagAtFreq (freqHz);
+                harmonicsB.push_back ({ n, 20.0f * std::log10 (mag + 1e-10f) });
+                if (n == 1) h1B = mag + 1e-10f;
+                else        sumSqB += mag * mag;
+            }
+            thdB = std::sqrt (sumSqB) / h1B * 100.0f;
+        }
+
         // Publish results (protected by the shared resultMutex)
         {
             const juce::ScopedLock lock (proc.resultMutex);
-            proc.thdHarmonics = harmonics;
-            proc.thdPercent   = thd;
+            proc.thdHarmonics  = harmonics;
+            proc.thdPercent    = thd;
+            if (!harmonicsB.empty())
+            {
+                proc.thdHarmonicsB = harmonicsB;
+                proc.thdPercentB   = thdB;
+            }
         }
 
         juce::Thread::sleep (100);   // THD updates at ~10 Hz (slow measurement)
@@ -1634,6 +1687,12 @@ std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getWetSpectrum() 
     return wetSpectrumResult;
 }
 
+std::vector<std::pair<float,float>> PluginScopeAudioProcessor::getWetSpectrumB() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return wetSpectrumResultB;
+}
+
 //==============================================================================
 // Phase 3.4: THD result accessors — thread-safe reads of thdHarmonics/thdPercent.
 // Both protected by resultMutex (same lock used by freqResponseResult).
@@ -1648,6 +1707,18 @@ float PluginScopeAudioProcessor::getThdPercent() const
 {
     const juce::ScopedLock lock (resultMutex);
     return thdPercent;
+}
+
+std::vector<std::pair<int,float>> PluginScopeAudioProcessor::getThdHarmonicsB() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return thdHarmonicsB;
+}
+
+float PluginScopeAudioProcessor::getThdPercentB() const
+{
+    const juce::ScopedLock lock (resultMutex);
+    return thdPercentB;
 }
 
 //==============================================================================
@@ -1788,24 +1859,74 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     // -----------------------------------------------------------------------
     if (testSignalMode == 4)
     {
+        // When dynamics sweep is running, inject the controlled test sine just like
+        // generated signal modes do — overrides DAW audio for the duration of the sweep.
+        const int liveAnalysisType = static_cast<int> (analysisTypeParam->load());
+        if (liveAnalysisType == 1)
+        {
+            // Dynamics: inject controlled sine at the level set by the analysis thread.
+            const float level    = dynamicsSineLevel.load();
+            const float phaseInc = 2.0f * juce::MathConstants<float>::pi
+                                   * 1000.0f / static_cast<float> (currentSampleRate);
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float sample = std::sin (dynamicsSinePhaseAccum) * level;
+                hostedInputBuffer.setSample (0, i, sample);
+                hostedInputBuffer.setSample (1, i, sample);
+                dynamicsSinePhaseAccum += phaseInc;
+                if (dynamicsSinePhaseAccum > juce::MathConstants<float>::twoPi)
+                    dynamicsSinePhaseAccum -= juce::MathConstants<float>::twoPi;
+            }
+        }
+        else if (liveAnalysisType == 2)
+        {
+            // THD: inject a clean 1 kHz sine at -12 dBFS, same as the non-live THD path.
+            // Live DAW audio contains energy at harmonic frequencies that would be
+            // misread as distortion, so we always use a controlled test tone here.
+            const float levelScale = juce::Decibels::decibelsToGain (-12.0f);
+            const float phaseInc   = 2.0f * juce::MathConstants<float>::pi
+                                     * kThdFundamental / static_cast<float> (currentSampleRate);
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float sample = std::sin (thdSinePhase) * levelScale;
+                hostedInputBuffer.setSample (0, i, sample);
+                hostedInputBuffer.setSample (1, i, sample);
+                thdSinePhase += phaseInc;
+                if (thdSinePhase > juce::MathConstants<float>::twoPi)
+                    thdSinePhase -= juce::MathConstants<float>::twoPi;
+            }
+        }
+        else
+        {
+            // All other analysis types: pass live DAW audio through.
+            const int nCh = hostedInputBuffer.getNumChannels();
+            for (int ch = 0; ch < nCh; ++ch)
+            {
+                if (ch < numChannels)
+                    hostedInputBuffer.copyFrom (ch, 0, buffer, ch, 0, numSamples);
+                else
+                    hostedInputBuffer.clear (ch, 0, numSamples);
+            }
+        }
+        captureDrySamples (numSamples);
+
         const juce::SpinLock::ScopedTryLockType sl (pluginLock);
         if (sl.isLocked() && pluginReady.load() && hostedPlugin != nullptr)
         {
-            // Copy DAW input into hostedOutputBuffer as plugin input.
+            // Feed hostedInputBuffer into the plugin.
+            // In dynamics mode (liveAnalysisType==1) hostedInputBuffer holds the test sine;
+            // otherwise it holds the live DAW audio (copied above).
             // Extra plugin channels (beyond DAW channels) are cleared to silence.
             {
                 const int nCh = hostedOutputBuffer.getNumChannels();
                 for (int ch = 0; ch < nCh; ++ch)
                 {
-                    if (ch < numChannels)
-                        hostedOutputBuffer.copyFrom (ch, 0, buffer, ch, 0, numSamples);
+                    if (ch < hostedInputBuffer.getNumChannels())
+                        hostedOutputBuffer.copyFrom (ch, 0, hostedInputBuffer, ch, 0, numSamples);
                     else
                         hostedOutputBuffer.clear (ch, 0, numSamples);
                 }
             }
-
-            // Phase 3.3: Capture DAW input as the dry (pre-plugin) reference
-            captureDrySamples (numSamples);
 
             juce::MidiBuffer emptyMidi;
             try
@@ -1830,7 +1951,42 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                 captureOutputSamples (numSamples);
             }
         }
-        // If no hosted plugin in Live Audio mode: pass through unchanged
+        else
+        {
+            // No plugin loaded — mirror DAW input into hostedOutputBuffer so
+            // captureOutputSamples reads real audio (dry == wet → flat 0 dB response)
+            if (hostedOutputBuffer.getNumChannels() >= 2 &&
+                hostedOutputBuffer.getNumSamples() >= numSamples)
+            {
+                for (int ch = 0; ch < juce::jmin (2, numChannels); ++ch)
+                    hostedOutputBuffer.copyFrom (ch, 0, buffer, ch, 0, numSamples);
+            }
+            captureOutputSamples (numSamples);
+        }
+
+        // Plugin B — route same DAW input through B for A/B comparison in Live Audio mode
+        {
+            const juce::SpinLock::ScopedTryLockType slB (pluginBLock);
+            if (slB.isLocked() && pluginBReady.load() && hostedPluginB != nullptr)
+            {
+                const int nChB = hostedOutputBufferB.getNumChannels();
+                for (int ch = 0; ch < nChB; ++ch)
+                {
+                    if (ch < numChannels)
+                        hostedOutputBufferB.copyFrom (ch, 0, hostedInputBuffer, ch, 0, numSamples);
+                    else
+                        hostedOutputBufferB.clear (ch, 0, numSamples);
+                }
+
+                juce::MidiBuffer emptyMidiB;
+                try { hostedPluginB->processBlock (hostedOutputBufferB, emptyMidiB); }
+                catch (...) { pluginBReady.store (false); }
+
+                if (pluginBReady.load())
+                    captureOutputSamplesB (numSamples);
+            }
+        }
+
         return;
     }
 
@@ -1859,6 +2015,7 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                     dynamicsSinePhaseAccum -= juce::MathConstants<float>::twoPi;
             }
 
+            // Plugin A
             {
                 const juce::SpinLock::ScopedTryLockType sl (pluginLock);
                 if (sl.isLocked() && pluginReady.load() && hostedPlugin != nullptr)
@@ -1882,6 +2039,31 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                     }
                     if (pluginReady.load())
                         captureOutputSamples (numSamples);
+                }
+            }
+
+            // Plugin B — feed the same dynamics sine so B's curve is measured in parallel
+            {
+                const juce::SpinLock::ScopedTryLockType slB (pluginBLock);
+                if (slB.isLocked() && pluginBReady.load() && hostedPluginB != nullptr)
+                {
+                    const int nChB = hostedOutputBufferB.getNumChannels();
+                    for (int ch = 0; ch < nChB; ++ch)
+                    {
+                        const int srcCh = juce::jmin (ch, hostedInputBuffer.getNumChannels() - 1);
+                        hostedOutputBufferB.copyFrom (ch, 0, hostedInputBuffer, srcCh, 0, numSamples);
+                    }
+                    juce::MidiBuffer emptyMidiB;
+                    try
+                    {
+                        hostedPluginB->processBlock (hostedOutputBufferB, emptyMidiB);
+                    }
+                    catch (...)
+                    {
+                        pluginBReady.store (false);
+                    }
+                    if (pluginBReady.load())
+                        captureOutputSamplesB (numSamples);
                 }
             }
 
@@ -1916,7 +2098,8 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             // Capture the 1 kHz sine as the dry reference
             captureDrySamples (numSamples);
 
-            // Route through hosted plugin and capture wet output
+            // Route through hosted plugin and capture wet output.
+            // If no plugin is loaded, mirror the sine so THD shows 0% (clean passthrough).
             {
                 const juce::SpinLock::ScopedTryLockType sl (pluginLock);
                 if (sl.isLocked() && pluginReady.load() && hostedPlugin != nullptr)
@@ -1940,6 +2123,36 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                     }
                     if (pluginReady.load())
                         captureOutputSamples (numSamples);
+                }
+                else
+                {
+                    // No plugin loaded — mirror sine directly so THD reads 0% (clean)
+                    const int nCh = hostedOutputBuffer.getNumChannels();
+                    for (int ch = 0; ch < nCh; ++ch)
+                    {
+                        const int srcCh = juce::jmin (ch, hostedInputBuffer.getNumChannels() - 1);
+                        hostedOutputBuffer.copyFrom (ch, 0, hostedInputBuffer, srcCh, 0, numSamples);
+                    }
+                    captureOutputSamples (numSamples);
+                }
+            }
+
+            // Plugin B — same sine through B for A/B THD comparison
+            {
+                const juce::SpinLock::ScopedTryLockType slB (pluginBLock);
+                if (slB.isLocked() && pluginBReady.load() && hostedPluginB != nullptr)
+                {
+                    const int nChB = hostedOutputBufferB.getNumChannels();
+                    for (int ch = 0; ch < nChB; ++ch)
+                    {
+                        const int srcCh = juce::jmin (ch, hostedInputBuffer.getNumChannels() - 1);
+                        hostedOutputBufferB.copyFrom (ch, 0, hostedInputBuffer, srcCh, 0, numSamples);
+                    }
+                    juce::MidiBuffer emptyMidiB;
+                    try { hostedPluginB->processBlock (hostedOutputBufferB, emptyMidiB); }
+                    catch (...) { pluginBReady.store (false); }
+                    if (pluginBReady.load())
+                        captureOutputSamplesB (numSamples);
                 }
             }
 

@@ -455,6 +455,16 @@ public:
                 proc.freqResponseAccum.clear();
                 proc.freqResponseFrameCountB = 0;
                 proc.freqResponseAccumB.clear();
+
+                // Clear THD results so the timer thread doesn't push stale measurements
+                // back to JS right after the user clicks Analyze (JS cleared thdData on click)
+                {
+                    const juce::ScopedLock lock (proc.resultMutex);
+                    proc.thdHarmonics.clear();
+                    proc.thdPercent    = 0.0f;
+                    proc.thdHarmonicsB.clear();
+                    proc.thdPercentB   = 0.0f;
+                }
             }
 
             // Snapshot mode — freeze result, don't analyse new data
@@ -707,6 +717,26 @@ private:
             juce::Thread::sleep (10);
             return;
         }
+
+        // Drain excess samples so we always measure the FRESHEST data.
+        // Audio arrives faster than we consume it (~44k/s in vs ~41k/s out),
+        // causing a growing backlog of old samples at the front of the FIFO.
+        // Without this, changing plugin settings takes many seconds to show up.
+        {
+            auto drainExcess = [] (juce::AbstractFifo& fifo, int keepSlots)
+            {
+                const int excess = fifo.getNumReady() - keepSlots;
+                if (excess > 0)
+                {
+                    int s1, sz1, s2, sz2;
+                    fifo.prepareToRead (excess, s1, sz1, s2, sz2);
+                    fifo.finishedRead (sz1 + sz2);
+                }
+            };
+            drainExcess (proc.captureFifo,  needed * 2);  // keep exactly kFftSize stereo slots
+            drainExcess (proc.captureFifoB, needed * 2);
+        }
+
 
         // Read wet output into work buffer
         proc.readFifoIntoBuffer (proc.captureFifo, proc.captureBuffer,
@@ -1987,6 +2017,11 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             }
         }
 
+        // THD mode injects a test tone — silence the DAW output so the user
+        // doesn't hear the 1 kHz sine through their monitors/headphones.
+        if (liveAnalysisType == 2)
+            buffer.clear();
+
         return;
     }
 
@@ -2521,6 +2556,13 @@ void PluginScopeAudioProcessor::loadPluginB (
         hostedPluginB.reset();
     }
 
+    // Clear stale B THD results — new plugin has different characteristics
+    {
+        const juce::ScopedLock lock (resultMutex);
+        thdHarmonicsB.clear();
+        thdPercentB = 0.0f;
+    }
+
     const auto resolvedDescB = resolveVST3Description (formatManager, desc);
 
     formatManager.createPluginInstanceAsync (
@@ -2572,6 +2614,12 @@ void PluginScopeAudioProcessor::unloadPluginB()
     latencyMethodBB.store (-1);
     latencyMsAB.store (0.0f);
     latencyMsBB.store (0.0f);
+    // Reset B THD results so stale measurements don't persist after unload
+    {
+        const juce::ScopedLock lock (resultMutex);
+        thdHarmonicsB.clear();
+        thdPercentB = 0.0f;
+    }
 }
 
 //==============================================================================

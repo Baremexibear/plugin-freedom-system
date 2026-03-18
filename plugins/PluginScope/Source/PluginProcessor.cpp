@@ -1354,7 +1354,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginScopeAudioProcessor::c
                                             "Harmonic Distortion", "Phase Response",
                                             "Latency" };
     juce::StringArray testSignalChoices   { "Sine Sweep", "White Noise", "Pink Noise",
-                                            "Impulse", "Live Audio" };
+                                            "Live Audio" };
     juce::StringArray comparisonChoices   { "Off", "A/B Plugins", "Before-After" };
 
     return {
@@ -1815,15 +1815,6 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     // Read active test signal mode (0-4, atomic load — real-time safe)
     const int testSignalMode = static_cast<int> (testSignalParam->load());
 
-    // --- Detect test signal mode change ---
-    // Reset impulsePending when the user re-selects Impulse mode (index 3)
-    if (testSignalMode != previousTestSignalMode)
-    {
-        if (testSignalMode == 3)
-            impulsePending = true;
-        previousTestSignalMode = testSignalMode;
-    }
-
     // -----------------------------------------------------------------------
     // Phase 3.7: Latency Detection — when analysis_type == 4, inject a Dirac
     // impulse (triggered by latencyImpulsePending set by analysis thread) and
@@ -1885,9 +1876,9 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     }
 
     // -----------------------------------------------------------------------
-    // Mode 4: Live Audio — copy DAW input through the hosted plugin
+    // Mode 3: Live Audio — copy DAW input through the hosted plugin
     // -----------------------------------------------------------------------
-    if (testSignalMode == 4)
+    if (testSignalMode == 3)
     {
         // When dynamics sweep is running, inject the controlled test sine just like
         // generated signal modes do — overrides DAW audio for the duration of the sweep.
@@ -2264,19 +2255,6 @@ void PluginScopeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                 pink  *= levelScale;
                 hostedInputBuffer.setSample (0, i, pink);
                 hostedInputBuffer.setSample (1, i, pink);
-            }
-            break;
-        }
-
-        // --- Mode 3: Impulse (Dirac delta) ---
-        case 3:
-        {
-            hostedInputBuffer.clear();
-            if (impulsePending)
-            {
-                hostedInputBuffer.setSample (0, 0, levelScale);
-                hostedInputBuffer.setSample (1, 0, levelScale);
-                impulsePending = false;   // One-shot; reset when mode is re-selected
             }
             break;
         }

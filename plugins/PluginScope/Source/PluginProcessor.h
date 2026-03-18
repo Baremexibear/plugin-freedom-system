@@ -218,10 +218,6 @@ private:
           pinkB3 { 0.0f }, pinkB4 { 0.0f }, pinkB5 { 0.0f }, pinkB6 { 0.0f };
     juce::Random noiseRandom;
 
-    // Impulse state
-    bool impulsePending        { true };  // true = next processBlock fires the impulse
-    int  previousTestSignalMode { -1 };   // For detecting test signal type changes
-
     // Phase 3.2: Lock-free output capture buffer (audio thread -> analysis thread)
     // Sized for 1 full second at the highest likely sample rate (192kHz x 2ch)
     static constexpr int kCaptureFifoSize = 192000 * 2;   // samples (interleaved stereo)

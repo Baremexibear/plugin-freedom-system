@@ -456,14 +456,18 @@ public:
                 proc.freqResponseFrameCountB = 0;
                 proc.freqResponseAccumB.clear();
 
-                // Clear THD results so the timer thread doesn't push stale measurements
-                // back to JS right after the user clicks Analyze (JS cleared thdData on click)
+                // Clear all stale results so the timer stops pushing old data to JS
                 {
                     const juce::ScopedLock lock (proc.resultMutex);
                     proc.thdHarmonics.clear();
                     proc.thdPercent    = 0.0f;
                     proc.thdHarmonicsB.clear();
                     proc.thdPercentB   = 0.0f;
+                    proc.freqResponseResult.clear();
+                    proc.freqResponseResultB.clear();
+                    std::fill (proc.phaseResponseResult.begin(),  proc.phaseResponseResult.end(),  std::make_pair (0.0f, 0.0f));
+                    std::fill (proc.groupDelayResult.begin(),     proc.groupDelayResult.end(),     std::make_pair (0.0f, 0.0f));
+                    std::fill (proc.phaseResponseResultB.begin(), proc.phaseResponseResultB.end(), std::make_pair (0.0f, 0.0f));
                 }
             }
 
@@ -2515,6 +2519,9 @@ void PluginScopeAudioProcessor::unloadPlugin()
         const juce::SpinLock::ScopedLockType sl (pluginLock);
         hostedPlugin.reset();
     }
+
+    // Drain FIFOs and clear all stale measurement results so the UI goes blank
+    analysisResetPending.store (true);
 }
 
 //==============================================================================
